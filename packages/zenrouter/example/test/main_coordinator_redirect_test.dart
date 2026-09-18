@@ -46,6 +46,7 @@ List<RouteTarget> everyRoute() => [
   HubRoute(),
   OnboardingRoute(),
   NotFoundRoute(Uri.parse('/x')),
+  HelpRoute(topic: const ['rules']),
   ShopShell(),
   HomeTab(),
   CatalogTab(),
@@ -277,7 +278,10 @@ void main() {
         'auth': ['SignInRoute'],
       }),
     );
-    expect(c.currentUri, Uri.parse('/account/sign-in'));
+    expect(
+      c.currentUri,
+      Uri.parse('/account/sign-in?from=%2F&continue=%2Faccount%2Fprofile'),
+    );
 
     c.host.clearTrace();
     await tapKey(tester, 'auth-sign-in');
@@ -653,7 +657,16 @@ void main() {
         'auth': ['SignInRoute'],
       }),
     );
-    expect(c.currentUri, Uri.parse('/account/sign-in'));
+    // Two queries: where the user came from, and where signing in continues.
+    expect(
+      c.currentUri,
+      Uri.parse('/account/sign-in?from=%2Fshop&continue=%2Faccount%2Fprofile'),
+    );
+
+    await back(tester);
+
+    expect(find.text('Shop home'), findsOneWidget);
+    expect(c.currentUri, Uri.parse('/shop'));
   });
 
   testWidgets('E6 signed out, the profile link on a feed page lands on SignIn '
@@ -681,7 +694,12 @@ void main() {
         'auth': ['SignInRoute'],
       }),
     );
-    expect(c.currentUri, Uri.parse('/account/sign-in'));
+    expect(
+      c.currentUri,
+      Uri.parse(
+        '/account/sign-in?from=%2Ffeed%2Ffor-you&continue=%2Faccount%2Fprofile',
+      ),
+    );
   });
 
   testWidgets('E7 tapping Billing on the bottom bar calls goToIndexed '
@@ -843,6 +861,7 @@ void main() {
       expect(from.redirectScopeOf(HubRoute()), [root]);
       expect(from.redirectScopeOf(OnboardingRoute()), [root]);
       expect(from.redirectScopeOf(NotFoundRoute(Uri.parse('/x'))), [root]);
+      expect(from.redirectScopeOf(HelpRoute(topic: const ['rules'])), [root]);
       expect(from.redirectScopeOf(HomeTab()), [root, shop]);
       expect(from.redirectScopeOf(CatalogTab()), [root, shop]);
       expect(from.redirectScopeOf(BillingTab()), [root, shop]);
@@ -1238,6 +1257,11 @@ void main() {
 
     expect(await parse('/'), isA<HubRoute>());
     expect(await parse('/welcome'), isA<OnboardingRoute>());
+    expect(await parse('/help'), HelpRoute(topic: const []));
+    expect(
+      await parse('/help/rules/order'),
+      HelpRoute(topic: const ['rules', 'order']),
+    );
     expect(await parse('/shop'), isA<HomeTab>());
     expect(await parse('/shop/catalog'), isA<CatalogTab>());
     expect(await parse('/shop/billing'), isA<BillingTab>());
@@ -1897,8 +1921,19 @@ void main() {
       findsOneWidget,
     );
 
-    // The same sign-in page stays; it now carries the new attempt.
+    expect(
+      '${c.currentUri}',
+      '/account/sign-in?from=%2F&continue=%2Faccount%2Fsecurity',
+    );
+
+    // The same sign-in page stays; it now carries the new attempt. The user
+    // is on the sign-in page now, but that is not where they came from: the
+    // first origin is kept.
     await typeUrl(tester, '/account/profile');
+    expect(
+      '${c.currentUri}',
+      '/account/sign-in?from=%2F&continue=%2Faccount%2Fprofile',
+    );
     expect(
       find.text(
         'RequireSession sent you here: /account/profile needs a session.',
@@ -1974,5 +2009,311 @@ void main() {
         'auth': ['ProfileRoute'],
       }),
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Routing is declared: every module owns a RouteManifest, and the root
+  // composes them into one graph.
+  // ---------------------------------------------------------------------------
+
+  test('manifest: the root composes every module\'s graph into one, with each '
+      'shell as the kind of layout its path is', () {
+    final graph = c.routeManifest;
+
+    expect(
+      {for (final route in graph.routes) route.path},
+      {
+        '/',
+        '/welcome',
+        '/help/...:topic',
+        '/shop',
+        '/shop/catalog',
+        '/shop/billing',
+        '/feed',
+        '/feed/for-you',
+        '/feed/for-you/post/:id',
+        '/feed/following',
+        '/feed/following/post/:id',
+        '/account/sign-in',
+        '/account/profile',
+        '/account/security',
+      },
+    );
+    expect(
+      {for (final layout in graph.layouts) layout.id: layout.kind.name},
+      {
+        ShopRouteId.shell: 'indexed',
+        FeedRouteId.shell: 'branched',
+        FeedRouteId.forYouBranch: 'stack',
+        FeedRouteId.followingBranch: 'stack',
+        AuthRouteId.shell: 'stack',
+        SecurityRouteId.shell: 'stack',
+      },
+    );
+    // The fixed children are the tabs and the branch roots, in order.
+    expect((graph[ShopRouteId.shell]! as RouteManifestLayout).kind.childIds, [
+      ShopRouteId.home,
+      ShopRouteId.catalog,
+      ShopRouteId.billing,
+    ]);
+    expect((graph[FeedRouteId.shell]! as RouteManifestLayout).kind.childIds, [
+      FeedRouteId.forYouBranch,
+      FeedRouteId.followingBranch,
+    ]);
+  });
+
+  test(
+    'manifest: every route builds the URL that resolves back to it',
+    () async {
+      final routes = [
+        for (final route in everyRoute())
+          if (route is RouteUnique &&
+              route is! RouteLayout &&
+              route is! RouteNotFound)
+            route,
+        PostRoute(FeedBranch.following, 12),
+        FeedListRoute(FeedBranch.following),
+      ];
+      expect(routes, hasLength(13));
+
+      for (final route in routes) {
+        expect(
+          await c.parseRouteFromUri(route.toUri()),
+          route,
+          reason: '${route.toUri()} resolves back to ${labelOf(route)}',
+        );
+      }
+    },
+  );
+
+  test('manifest: a route sits behind a shell exactly when its manifest node '
+      'has a parent', () async {
+    for (final node in c.routeManifest.routes) {
+      final uri = c.routeManifest.location(
+        node.id,
+        pathParameters: {
+          for (final segment in node.pattern.segments)
+            if (segment.kind == RoutePatternSegmentKind.parameter)
+              segment.value: '1',
+        },
+        restParameters: {
+          for (final segment in node.pattern.segments)
+            if (segment.kind == RoutePatternSegmentKind.rest)
+              segment.value: const ['a', 'b'],
+        },
+      );
+      final route = (await c.parseRouteFromUri(uri))!;
+      expect(
+        route.layout != null,
+        node.parentId != null,
+        reason: '${node.path}: layout ${route.layout}, parent ${node.parentId}',
+      );
+    }
+  });
+
+  test('manifest: what no pattern matches is not found, and so is a post '
+      'whose id is not a number', () async {
+    for (final location in [
+      '/shop/',
+      '/SHOP/catalog',
+      '/shop/catalog/extra',
+      '/feed/nope',
+      '/feed/for-you/post/abc',
+      '/account',
+    ]) {
+      final route = await c.parseRouteFromUri(Uri.parse(location));
+      expect(route, isA<RouteNotFound>(), reason: location);
+      expect(route, NotFoundRoute(Uri.parse(location)), reason: location);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // RouteManifest.location: a path parameter, a rest parameter, query
+  // parameters and a fragment, each on a route that needs it.
+  // ---------------------------------------------------------------------------
+
+  test('location: every part of a URL survives the round trip through its '
+      'manifest', () async {
+    // A path parameter.
+    final post = PostRoute(FeedBranch.following, 12);
+    expect('${post.toUri()}', '/feed/following/post/12');
+    expect(await c.parseRouteFromUri(post.toUri()), post);
+
+    // Query parameters. They are not part of the tab's identity.
+    final catalog = CatalogTab(queries: {'sort': 'price'});
+    expect('${catalog.toUri()}', '/shop/catalog?sort=price');
+    expect('${CatalogTab().toUri()}', '/shop/catalog');
+    final parsedCatalog =
+        (await c.parseRouteFromUri(catalog.toUri()))! as CatalogTab;
+    expect(parsedCatalog, CatalogTab());
+    expect(parsedCatalog.query('sort'), 'price');
+
+    // A rest parameter and a fragment. The fragment is not identity either.
+    final help = HelpRoute(topic: const ['rules', 'order'], section: 'stop');
+    expect('${help.toUri()}', '/help/rules/order#stop');
+    expect('${HelpRoute(topic: const []).toUri()}', '/help');
+    final parsedHelp = (await c.parseRouteFromUri(help.toUri()))! as HelpRoute;
+    expect(parsedHelp.topic, ['rules', 'order']);
+    expect(parsedHelp.section.value, 'stop');
+    expect(parsedHelp, HelpRoute(topic: const ['rules', 'order']));
+  });
+
+  testWidgets('location: the catalog keeps its sort in the URL query, and a '
+      'typed query reaches the open tab', (tester) async {
+    await pumpApp(tester);
+    final entry = c.shop.tabs.stack[1];
+
+    await typeUrl(tester, '/shop/catalog?sort=price');
+
+    expect(find.text('Sorted by price'), findsOneWidget);
+    expect('${c.currentUri}', '/shop/catalog?sort=price');
+    // The tab set keeps its entry; the typed query reached it.
+    expect(c.shop.tabs.stack[1], same(entry));
+
+    await tapKey(tester, 'catalog-sort-name');
+
+    expect(find.text('Sorted by name'), findsOneWidget);
+    expect('${c.currentUri}', '/shop/catalog?sort=name');
+
+    await typeUrl(tester, '/shop/catalog?sort=price');
+
+    expect(find.text('Sorted by price'), findsOneWidget);
+    expect(c.shop.tabs.stack[1], same(entry));
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'ShopShell'],
+      }),
+    );
+  });
+
+  testWidgets('location: the help page is layout-less, so it lands on the root '
+      'stack behind the root rule only, and keeps its section in the URL '
+      'fragment', (tester) async {
+    await pumpApp(tester);
+    c.host.clearTrace();
+
+    await typeUrl(tester, '/help/rules/order#stop');
+
+    expect(find.text('Help · rules › order'), findsOneWidget);
+    expect(find.byKey(const Key('help-section-stop-selected')), findsOneWidget);
+    expect(trace(), [pass('OnboardingGate', 'HelpRoute')]);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'HelpRoute[rules,order]'],
+      }),
+    );
+
+    await tapKey(tester, 'help-section-scope');
+
+    expect(
+      find.byKey(const Key('help-section-scope-selected')),
+      findsOneWidget,
+    );
+    expect('${c.currentUri}', '/help/rules/order#scope');
+
+    // Another fragment typed is the same page, on another section.
+    await typeUrl(tester, '/help/rules/order#order');
+
+    expect(
+      find.byKey(const Key('help-section-order-selected')),
+      findsOneWidget,
+    );
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'HelpRoute[rules,order]'],
+      }),
+    );
+
+    await back(tester);
+    await tapKey(tester, 'hub-help');
+
+    expect(find.textContaining('Help · '), findsOneWidget);
+  });
+
+  testWidgets('location: the sign-in page keeps where the user was going in '
+      'its URL query, so the attempt survives a reload', (tester) async {
+    await pumpApp(tester);
+
+    await tapKey(tester, 'hub-security');
+
+    expect(
+      '${c.currentUri}',
+      '/account/sign-in?from=%2F&continue=%2Faccount%2Fsecurity',
+    );
+    expect(c.auth.authStack.stack.single, isA<RouteQueryParameters>());
+
+    // A reload is a cold start on that URL.
+    c = AppCoordinator(
+      initialRoutePath: Uri.parse(
+        '/account/sign-in?continue=%2Faccount%2Fprofile',
+      ),
+    );
+    await pumpApp(tester);
+
+    expect(
+      find.text(
+        'RequireSession sent you here: /account/profile needs a session.',
+      ),
+      findsOneWidget,
+    );
+
+    await tapKey(tester, 'auth-sign-in');
+
+    expect(find.text('Your profile'), findsOneWidget);
+  });
+
+  testWidgets('location: a cold start on a gated URL has nowhere it came '
+      'from, so the sign-in URL has no from', (tester) async {
+    c = AppCoordinator(initialRoutePath: Uri.parse('/account/profile'));
+    await pumpApp(tester);
+
+    expect('${c.currentUri}', '/account/sign-in?continue=%2Faccount%2Fprofile');
+    expect(find.textContaining('You came from'), findsNothing);
+  });
+
+  testWidgets('location: "Not now" returns where the user came from: a back '
+      'while that page is under this one, its URL after a reload', (
+    tester,
+  ) async {
+    await pumpApp(tester);
+    await tapKey(tester, 'hub-shop-home');
+    await tapKey(tester, 'shop-link-profile');
+
+    expect(find.text('You came from /shop.'), findsOneWidget);
+
+    await tapKey(tester, 'auth-not-now');
+
+    expect(find.text('Shop home'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'ShopShell'],
+      }),
+    );
+
+    // A reload is a cold start on the sign-in URL: nothing is under the page,
+    // so the origin comes from the URL.
+    c = AppCoordinator(
+      initialRoutePath: Uri.parse(
+        '/account/sign-in?from=%2Fshop%2Fcatalog&continue=%2Faccount%2Fprofile',
+      ),
+    );
+    await pumpApp(tester);
+
+    expect(find.text('You came from /shop/catalog.'), findsOneWidget);
+
+    await tapKey(tester, 'auth-not-now');
+
+    expect(find.text('Catalog'), findsWidgets);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['ShopShell'],
+      }),
+    );
+    expect(c.shop.tabs.activeIndex, 1);
   });
 }

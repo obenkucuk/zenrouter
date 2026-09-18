@@ -10,8 +10,12 @@
 // `subModules`. The host registers SecurityModule that way, which makes it
 // the two-levels-deep case, root > auth > security.
 //
-// The coordinator parses its own URIs in parseRouteFromUri, then falls back
-// to super, which asks its sub-modules.
+// The coordinator owns its routing as a RouteManifest, like every module. It
+// cannot mix in RouteModuleBinding: that mixin and CoordinatorModular both
+// implement parseRouteFromUri. A coordinator that groups sub-modules gives its
+// own graph to the composed one through localRouteManifestFragment instead,
+// resolves its own URLs through its bindings, then falls back to super, which
+// asks its sub-modules.
 //
 // This file imports only flutter and zenrouter. Its state (AuthSession) and
 // the trace come from the host, through the constructor. A link to another
@@ -29,6 +33,9 @@ class AuthSession {
 
   void reset() => signedIn.value = false;
 }
+
+/// The IDs of this coordinator's manifest: its shell, then its routes.
+enum AuthRouteId { shell, signIn, profile }
 
 class AuthRouteModuleCoordinator extends Coordinator<RouteUnique>
     with CoordinatorModular<RouteUnique>, RouteModuleRedirectRule<RouteUnique> {
@@ -69,16 +76,48 @@ class AuthRouteModuleCoordinator extends Coordinator<RouteUnique>
   @override
   Iterable<RouteModule<RouteUnique>> defineModules() => subModules(this);
 
+  /// This coordinator's own routing graph; its sub-modules bring theirs.
+  static final manifest = RouteManifest<AuthRouteId>(
+    name: 'auth',
+    idCodec: RouteIdCodec.enumValues(AuthRouteId.values),
+    layouts: [
+      RouteManifestLayout.stack(id: AuthRouteId.shell, path: '/account'),
+    ],
+    routes: [
+      RouteManifestRoute(
+        id: AuthRouteId.signIn,
+        path: '/account/sign-in',
+        parentId: AuthRouteId.shell,
+      ),
+      RouteManifestRoute(
+        id: AuthRouteId.profile,
+        path: '/account/profile',
+        parentId: AuthRouteId.shell,
+      ),
+    ],
+  );
+
+  /// From a manifest match to a route. No `notFound`: a URL this coordinator
+  /// does not own goes on to its sub-modules, then to its siblings.
+  late final routeBindings = manifest.bind<RouteUnique>(
+    bindings: [
+      RouteBinding(
+        id: AuthRouteId.signIn,
+        create: (match) => SignInRoute(queries: match.uri.queryParameters),
+      ),
+      RouteBinding(id: AuthRouteId.profile, create: (_) => ProfileRoute()),
+    ],
+  );
+
+  /// What this coordinator adds to the composed graph, next to what its
+  /// sub-modules add.
   @override
-  FutureOr<RouteUnique?> parseRouteFromUri(Uri uri) {
-    switch (uri.pathSegments) {
-      case ['account', 'sign-in']:
-        return SignInRoute();
-      case ['account', 'profile']:
-        return ProfileRoute();
-    }
-    return super.parseRouteFromUri(uri);
-  }
+  RouteManifestFragment<Object> get localRouteManifestFragment =>
+      manifest.fragment;
+
+  @override
+  FutureOr<RouteUnique?> parseRouteFromUri(Uri uri) async =>
+      await routeBindings.resolve(uri) ?? await super.parseRouteFromUri(uri);
 
   /// Not reached while this coordinator is a module: for an unknown URI it
   /// returns null, and the host's own fallback applies.
@@ -125,10 +164,24 @@ class RequireSession extends RedirectRule<RouteUnique> {
       return const RedirectResult.continueRedirect();
     }
     trace('$label($name) → SignInRoute (no session)');
-    // The sign-in page carries where the user was going, so signing in can
-    // continue there. It is this page's own, not shared state: a sign-in page
-    // opened directly has none, whatever was attempted before.
-    return RedirectResult.redirectTo(SignInRoute(attempt: route.toUri()));
+    // The sign-in URL carries both ends of the trip in its query: where the
+    // user was going, so signing in can continue there, and where they came
+    // from, so "Not now" can return there. It is this page's own, not shared
+    // state: a sign-in page opened directly has neither.
+    //
+    // The page on screen is where the user comes from. On a cold start
+    // nothing is on screen, so there is no origin. When the sign-in page
+    // itself is on screen, because a second gated URL was typed over it, it is
+    // not where the user came from: its own origin is kept.
+    final onScreen = coordinator.activePath.activeRoute;
+    final from = switch (onScreen) {
+      null => null,
+      SignInRoute(:final queries) => SignInRoute.originIn(queries),
+      _ => coordinator.currentUri,
+    };
+    return RedirectResult.redirectTo(
+      SignInRoute.after(route.toUri(), from: from),
+    );
   }
 }
 
@@ -182,29 +235,69 @@ class AuthLayout extends AuthRoute with RouteLayout<RouteUnique> {
       );
 }
 
-class SignInRoute extends AuthRoute {
-  SignInRoute({Uri? attempt}) : attempt = ValueNotifier(attempt);
+/// The sign-in page keeps both ends of the trip in its URL query:
+/// `/account/sign-in?from=/shop&continue=/account/profile`.
+///
+/// `continue` is where the user was going: "Sign in and continue" goes on
+/// there. `from` is the page they were on: "Not now" returns there. While that
+/// page is still under this one, returning is a plain back; after a reload
+/// nothing is under it, and the URL still says where it was.
+///
+/// [RouteQueryParameters] does the rest. The query is not part of the route's
+/// identity, so it is the same page whatever the attempt. Navigating to a
+/// sign-in page while one is open keeps the open one and hands it the new
+/// query through `onUpdate`, so the latest attempt wins: a user who types a
+/// second gated URL continues there, and one who opens sign-in directly has
+/// no attempt left. And the attempt survives a reload, because it is in the
+/// URL.
+class SignInRoute extends AuthRoute with RouteQueryParameters {
+  SignInRoute({Map<String, String> queries = const {}})
+    : queryNotifier = ValueNotifier(queries);
+
+  /// The sign-in page RequireSession sends a user to on their way to
+  /// [attempt], from the page at [from].
+  SignInRoute.after(Uri attempt, {Uri? from})
+    : this(
+        queries: {
+          if (from != null) originQuery: '$from',
+          attemptQuery: '$attempt',
+        },
+      );
+
+  /// The query that holds where the user was going: where "Sign in and
+  /// continue" continues.
+  static const attemptQuery = 'continue';
+
+  /// The query that holds the page the user was on: where "Not now" returns.
+  static const originQuery = 'from';
+
+  @override
+  final ValueNotifier<Map<String, String>> queryNotifier;
 
   /// Where the user was going when RequireSession sent them here, or null
-  /// when they opened this page themselves. Not part of the route's identity:
-  /// it is the same page either way.
-  final ValueNotifier<Uri?> attempt;
+  /// when they opened this page themselves.
+  static Uri? attemptIn(Map<String, String> queries) =>
+      _uriIn(queries, attemptQuery);
 
-  /// Navigating to a sign-in page while one is open keeps the open one, and
-  /// hands it the new one here. The latest attempt wins: a user who types a
-  /// second gated URL continues there, and one who opens sign-in directly has
-  /// no attempt left.
-  @override
-  void onUpdate(covariant SignInRoute newRoute) {
-    super.onUpdate(newRoute);
-    attempt.value = newRoute.attempt.value;
-  }
+  /// The page the user was on when RequireSession sent them here, or null
+  /// when there was none: a cold start, or a page opened directly.
+  static Uri? originIn(Map<String, String> queries) =>
+      _uriIn(queries, originQuery);
+
+  static Uri? _uriIn(Map<String, String> queries, String name) =>
+      switch (queries[name]) {
+        final value? => Uri.tryParse(value),
+        null => null,
+      };
 
   @override
   String get label => 'SignInRoute';
 
   @override
-  Uri toUri() => Uri.parse('/account/sign-in');
+  Uri toUri() => AuthRouteModuleCoordinator.manifest.location(
+    AuthRouteId.signIn,
+    queryParameters: queries,
+  );
 
   @override
   Widget build(covariant Coordinator coordinator, BuildContext context) {
@@ -212,16 +305,27 @@ class SignInRoute extends AuthRoute {
     return _Page(
       heading: 'Sign in',
       children: [
-        ValueListenableBuilder<Uri?>(
-          valueListenable: attempt,
-          builder: (context, attempt, _) => Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: Text(
-              attempt == null
-                  ? 'You opened this page yourself.'
-                  : 'RequireSession sent you here: $attempt needs a session.',
-            ),
-          ),
+        ValueListenableBuilder<Map<String, String>>(
+          valueListenable: queryNotifier,
+          builder: (context, queries, _) {
+            final attempt = attemptIn(queries);
+            final from = originIn(queries);
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    attempt == null
+                        ? 'You opened this page yourself.'
+                        : 'RequireSession sent you here: $attempt needs a '
+                              'session.',
+                  ),
+                  if (from != null) Text('You came from $from.'),
+                ],
+              ),
+            );
+          },
         ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -235,13 +339,28 @@ class SignInRoute extends AuthRoute {
               // may still stop that (Security needs 2FA); the user is then
               // on their profile, signed in, not on a sign-in page that did
               // nothing. Navigations run in the order they were started.
-              final attempt = this.attempt.value;
+              final attempt = attemptIn(queries);
               coordinator.pushReplacement(ProfileRoute());
               if (attempt != null && attempt != ProfileRoute().toUri()) {
                 coordinator.pushUri(attempt);
               }
             },
             child: const Text('Sign in and continue'),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: TextButton(
+            key: const Key('auth-not-now'),
+            onPressed: () async {
+              // Back to where the user came from. That page is under this
+              // one, unless the app was reloaded here: then nothing is, and
+              // the URL still says where it was.
+              final popped = await coordinator.tryPop();
+              if (popped != null) return;
+              coordinator.replaceUri(originIn(queries) ?? Uri.parse('/'));
+            },
+            child: const Text('Not now'),
           ),
         ),
       ],
@@ -254,7 +373,8 @@ class ProfileRoute extends AuthRoute {
   String get label => 'ProfileRoute';
 
   @override
-  Uri toUri() => Uri.parse('/account/profile');
+  Uri toUri() =>
+      AuthRouteModuleCoordinator.manifest.location(AuthRouteId.profile);
 
   @override
   Widget build(covariant Coordinator coordinator, BuildContext context) {

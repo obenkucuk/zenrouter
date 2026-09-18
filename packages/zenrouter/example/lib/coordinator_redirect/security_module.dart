@@ -9,6 +9,12 @@
 // Its shell (SecurityLayout) sits on the root stack; the registry, not the
 // widget tree, decides the chain. RequireTwoFactor returns Stop without 2FA.
 //
+// The module owns its routing as a RouteManifest: the shell, the routes under
+// it and their URL patterns. RouteModuleBinding matches URLs against it, the
+// bindings turn a match into a route, and toUri builds the same URL back from
+// it, so there is no parser to keep in step. The host composes every module's
+// manifest into one graph and checks it for conflicts.
+//
 // This file imports only flutter and zenrouter. Its state (TwoFactorStatus)
 // and the trace come from the host, through the constructor.
 // =============================================================================
@@ -23,13 +29,50 @@ class TwoFactorStatus {
   void reset() => enabled.value = false;
 }
 
+/// The IDs of this module's manifest: its shell, then its routes.
+enum SecurityRouteId { shell, settings }
+
 class SecurityModule extends RouteModule<RouteUnique>
-    with RouteModuleRedirectRule<RouteUnique> {
+    with
+        RouteModuleBinding<RouteUnique, SecurityRouteId>,
+        RouteModuleRedirectRule<RouteUnique> {
   SecurityModule(
     super.coordinator, {
     required this.status,
     required this.trace,
   });
+
+  /// The module's routing graph. `parentId` names the shell a route sits
+  /// behind; it must be the shell the route's `layout` names.
+  static final manifest = RouteManifest<SecurityRouteId>(
+    name: 'security',
+    idCodec: RouteIdCodec.enumValues(SecurityRouteId.values),
+    layouts: [
+      RouteManifestLayout.stack(
+        id: SecurityRouteId.shell,
+        path: '/account/security',
+      ),
+    ],
+    routes: [
+      RouteManifestRoute(
+        id: SecurityRouteId.settings,
+        path: '/account/security',
+        parentId: SecurityRouteId.shell,
+      ),
+    ],
+  );
+
+  /// From a manifest match to a route. No `notFound`: a URL this module does
+  /// not own falls through to the next module.
+  @override
+  late final routeBindings = manifest.bind<RouteUnique>(
+    bindings: [
+      RouteBinding(
+        id: SecurityRouteId.settings,
+        create: (_) => SecuritySettingsRoute(),
+      ),
+    ],
+  );
 
   final TwoFactorStatus status;
   final void Function(String line) trace;
@@ -48,12 +91,6 @@ class SecurityModule extends RouteModule<RouteUnique>
 
   @override
   List<StackPath> get paths => [securityStack];
-
-  @override
-  RouteUnique? parseRouteFromUri(Uri uri) => switch (uri.pathSegments) {
-    ['account', 'security'] => SecuritySettingsRoute(),
-    _ => null,
-  };
 }
 
 SecurityModule _securityOf(CoordinatorCore coordinator) =>
@@ -145,7 +182,7 @@ class SecuritySettingsRoute extends SecurityRoute {
   String get label => 'SecuritySettingsRoute';
 
   @override
-  Uri toUri() => Uri.parse('/account/security');
+  Uri toUri() => SecurityModule.manifest.location(SecurityRouteId.settings);
 
   @override
   Widget build(covariant Coordinator coordinator, BuildContext context) {

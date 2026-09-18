@@ -19,28 +19,65 @@
 // active branch's top post. From a branch's first page, it leaves the feed.
 // It never pops a branch's first page, so a back never leaves a branch empty.
 //
+// The module owns its routing as a RouteManifest: a branched shell whose
+// fixed children are the branch roots, each a stack layout with its list and
+// its posts under it. RouteModuleBinding matches URLs against it, the bindings
+// turn a match into a route, and toUri builds the same URL back from it, so
+// there is no parser to keep in step.
+//
 // This file imports only flutter and zenrouter. A link to another feature
 // goes by URI.
 // =============================================================================
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:zenrouter/zenrouter.dart';
 
-enum FeedBranch {
-  forYou('for-you', 'For you'),
-  following('following', 'Following');
+/// The IDs of this module's manifest: the shell, its branch roots, then the
+/// routes of each branch. [entry] is `/feed`, the feed's front door.
+enum FeedRouteId {
+  shell,
+  forYouBranch,
+  followingBranch,
+  entry,
+  forYouList,
+  forYouPost,
+  followingList,
+  followingPost,
+}
 
-  const FeedBranch(this.slug, this.title);
+enum FeedBranch {
+  forYou(
+    'for-you',
+    'For you',
+    layoutId: FeedRouteId.forYouBranch,
+    listId: FeedRouteId.forYouList,
+    postId: FeedRouteId.forYouPost,
+  ),
+  following(
+    'following',
+    'Following',
+    layoutId: FeedRouteId.followingBranch,
+    listId: FeedRouteId.followingList,
+    postId: FeedRouteId.followingPost,
+  );
+
+  const FeedBranch(
+    this.slug,
+    this.title, {
+    required this.layoutId,
+    required this.listId,
+    required this.postId,
+  });
 
   final String slug;
   final String title;
 
-  static FeedBranch? fromSlug(String slug) {
-    for (final branch in values) {
-      if (branch.slug == slug) return branch;
-    }
-    return null;
-  }
+  /// This branch in the manifest: its root, its list and its posts.
+  final FeedRouteId layoutId;
+  final FeedRouteId listId;
+  final FeedRouteId postId;
 
   /// The branch root a destination of this branch sits behind.
   Type get layout => switch (this) {
@@ -49,8 +86,79 @@ enum FeedBranch {
   };
 }
 
-class NewsFeedModule extends RouteModule<RouteUnique> {
+class NewsFeedModule extends RouteModule<RouteUnique>
+    with RouteModuleBinding<RouteUnique, FeedRouteId> {
   NewsFeedModule(super.coordinator);
+
+  /// The module's routing graph. A branched layout lists its branch roots as
+  /// fixed children, and every direct child of it must be one of them; a
+  /// branch's pages sit under its root.
+  static final manifest = RouteManifest<FeedRouteId>(
+    name: 'feed',
+    idCodec: RouteIdCodec.enumValues(FeedRouteId.values),
+    layouts: [
+      RouteManifestLayout.branched(
+        id: FeedRouteId.shell,
+        path: '/feed',
+        childIds: [for (final branch in FeedBranch.values) branch.layoutId],
+      ),
+      for (final branch in FeedBranch.values)
+        RouteManifestLayout.stack(
+          id: branch.layoutId,
+          path: '/feed/${branch.slug}',
+          parentId: FeedRouteId.shell,
+        ),
+    ],
+    routes: [
+      RouteManifestRoute(
+        id: FeedRouteId.entry,
+        path: '/feed',
+        parentId: FeedBranch.forYou.layoutId,
+      ),
+      for (final branch in FeedBranch.values) ...[
+        RouteManifestRoute(
+          id: branch.listId,
+          path: '/feed/${branch.slug}',
+          parentId: branch.layoutId,
+        ),
+        RouteManifestRoute(
+          id: branch.postId,
+          path: '/feed/${branch.slug}/post/:id',
+          parentId: branch.layoutId,
+        ),
+      ],
+    ],
+  );
+
+  /// From a manifest match to a route. No `notFound`: a URL this module does
+  /// not own falls through to the next module.
+  @override
+  late final routeBindings = manifest.bind<RouteUnique>(
+    bindings: [
+      RouteBinding(
+        id: FeedRouteId.entry,
+        create: (_) => FeedListRoute(FeedBranch.forYou),
+      ),
+      for (final branch in FeedBranch.values) ...[
+        RouteBinding(id: branch.listId, create: (_) => FeedListRoute(branch)),
+        RouteBinding(
+          id: branch.postId,
+          create: (match) =>
+              PostRoute(branch, int.parse(match.pathParameters['id']!)),
+        ),
+      ],
+    ],
+  );
+
+  /// A pattern cannot say that `:id` is a number, and a post id is one. A URL
+  /// with any other id is not a feed URL: the next module, or the host's
+  /// not-found page, gets it.
+  @override
+  FutureOr<RouteUnique?> parseRouteFromUri(Uri uri) {
+    final id = manifest.match(uri)?.pathParameters['id'];
+    if (id != null && int.tryParse(id) == null) return null;
+    return super.parseRouteFromUri(uri);
+  }
 
   late final NavigationPath<RouteUnique> forYouStack =
       NavigationPath<RouteUnique>.createWith(
@@ -79,23 +187,6 @@ class NewsFeedModule extends RouteModule<RouteUnique> {
   /// The branched path and every branch child path.
   @override
   List<StackPath> get paths => [branches, forYouStack, followingStack];
-
-  @override
-  RouteUnique? parseRouteFromUri(Uri uri) {
-    switch (uri.pathSegments) {
-      case ['feed']:
-        return FeedListRoute(FeedBranch.forYou);
-      case ['feed', final slug]:
-        final branch = FeedBranch.fromSlug(slug);
-        return branch == null ? null : FeedListRoute(branch);
-      case ['feed', final slug, 'post', final id]:
-        final branch = FeedBranch.fromSlug(slug);
-        final number = int.tryParse(id);
-        if (branch == null || number == null) return null;
-        return PostRoute(branch, number);
-    }
-    return null;
-  }
 }
 
 NewsFeedModule _feedOf(CoordinatorCore coordinator) =>
@@ -290,7 +381,7 @@ class FeedListRoute extends FeedRoute {
   List<Object?> get props => [branch.slug];
 
   @override
-  Uri toUri() => Uri.parse('/feed/${branch.slug}');
+  Uri toUri() => NewsFeedModule.manifest.location(branch.listId);
 
   @override
   Widget build(covariant Coordinator coordinator, BuildContext context) {
@@ -355,7 +446,10 @@ class PostRoute extends FeedRoute {
   List<Object?> get props => [branch.slug, id];
 
   @override
-  Uri toUri() => Uri.parse('/feed/${branch.slug}/post/$id');
+  Uri toUri() => NewsFeedModule.manifest.location(
+    branch.postId,
+    pathParameters: {'id': '$id'},
+  );
 
   @override
   Widget build(covariant Coordinator coordinator, BuildContext context) =>

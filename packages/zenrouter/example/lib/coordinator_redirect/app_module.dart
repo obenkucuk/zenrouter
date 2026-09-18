@@ -8,7 +8,7 @@
 //
 //   AppCoordinator                  root: [OnboardingGate]
 //   |   root            NavigationPath      HubRoute, OnboardingRoute,
-//   |                                       NotFoundRoute
+//   |                                       HelpRoute, NotFoundRoute
 //   |
 //   +-- ShopModule                  plain module: [SubscriptionGate]
 //   |     shop-tabs       IndexedStackPath    HomeTab, CatalogTab, BillingTab
@@ -29,7 +29,8 @@
 //
 // The chain each destination gets, in the order its rules run:
 //
-//   HubRoute, OnboardingRoute, NotFoundRoute   OnboardingGate
+//   HubRoute, OnboardingRoute, HelpRoute,      OnboardingGate
+//   NotFoundRoute
 //   HomeTab, CatalogTab, BillingTab            OnboardingGate > SubscriptionGate
 //   FeedListRoute, PostRoute                   OnboardingGate
 //   SignInRoute, ProfileRoute                  OnboardingGate > RequireSession
@@ -145,6 +146,9 @@ class HostState {
 // The root coordinator and the tree composition
 // =============================================================================
 
+/// The IDs of the host's manifest: the pages on the root stack.
+enum HostRouteId { hub, onboarding, help }
+
 /// The tree root.
 ///
 /// Its rules gate every destination, because the root lists every stack. See
@@ -201,17 +205,52 @@ class AppCoordinator extends Coordinator<RouteUnique>
 
   SecurityModule get security => getModule<SecurityModule>();
 
-  /// The host parses its own URIs, then asks the modules (super).
+  /// The host's own routing graph: the pages on the root stack. Each module
+  /// brings its own, and [routeManifest] is all of them composed into one
+  /// graph, checked for duplicate IDs and ambiguous URLs; zenrouter_devtools
+  /// draws it in its Graph tab.
+  static final manifest = RouteManifest<HostRouteId>(
+    name: 'host',
+    idCodec: RouteIdCodec.enumValues(HostRouteId.values),
+    routes: [
+      RouteManifestRoute(id: HostRouteId.hub, path: '/'),
+      RouteManifestRoute(id: HostRouteId.onboarding, path: '/welcome'),
+      // A rest parameter: any number of segments after /help.
+      RouteManifestRoute(id: HostRouteId.help, path: '/help/...:topic'),
+    ],
+  );
+
+  /// From a manifest match to a route. No `notFound`: a URL the host does not
+  /// own goes on to the modules, and [notFoundRoute] takes what none of them
+  /// owns.
+  late final routeBindings = manifest.bind<RouteUnique>(
+    bindings: [
+      RouteBinding(id: HostRouteId.hub, create: (_) => HubRoute()),
+      RouteBinding(
+        id: HostRouteId.onboarding,
+        create: (_) => OnboardingRoute(),
+      ),
+      RouteBinding(
+        id: HostRouteId.help,
+        create: (match) => HelpRoute(
+          topic: match.restParameters['topic']!,
+          section: match.uri.hasFragment ? match.uri.fragment : null,
+        ),
+      ),
+    ],
+  );
+
+  /// The root cannot mix in RouteModuleBinding: that mixin and
+  /// CoordinatorModular both implement parseRouteFromUri. A coordinator that
+  /// groups modules gives its own graph to the composed one here.
   @override
-  FutureOr<RouteUnique?> parseRouteFromUri(Uri uri) {
-    switch (uri.pathSegments) {
-      case []:
-        return HubRoute();
-      case ['welcome']:
-        return OnboardingRoute();
-    }
-    return super.parseRouteFromUri(uri);
-  }
+  RouteManifestFragment<Object> get localRouteManifestFragment =>
+      manifest.fragment;
+
+  /// The host resolves its own URLs, then asks the modules (super).
+  @override
+  FutureOr<RouteUnique?> parseRouteFromUri(Uri uri) async =>
+      await routeBindings.resolve(uri) ?? await super.parseRouteFromUri(uri);
 
   @override
   RouteUnique notFoundRoute(Uri uri) => NotFoundRoute(uri);
@@ -313,7 +352,7 @@ class HubRoute extends HostRoute {
   String get label => 'HubRoute';
 
   @override
-  Uri toUri() => Uri.parse('/');
+  Uri toUri() => AppCoordinator.manifest.location(HostRouteId.hub);
 
   @override
   Widget build(covariant AppCoordinator coordinator, BuildContext context) =>
@@ -325,14 +364,61 @@ class OnboardingRoute extends HostRoute {
   String get label => 'OnboardingRoute';
 
   @override
-  Uri toUri() => Uri.parse('/welcome');
+  Uri toUri() => AppCoordinator.manifest.location(HostRouteId.onboarding);
 
   @override
   Widget build(covariant AppCoordinator coordinator, BuildContext context) =>
       OnboardingPage(coordinator: coordinator);
 }
 
-class NotFoundRoute extends HostRoute {
+/// A help page. It has no layout, so it lands on the root stack and only the
+/// root's rules gate it.
+///
+/// Its URL uses the two parts of a location no other route here needs. A rest
+/// parameter, `/help/...:topic`, holds any number of segments. The fragment
+/// names the section on screen.
+///
+/// zenrouter has [RouteQueryParameters] for a query and nothing for a
+/// fragment, so this route treats its fragment the way that mixin treats a
+/// query. It is not part of the route's identity, so another section is the
+/// same page. A fragment typed into the address bar reaches the open page
+/// through [onUpdate]. The page rewrites its URL in place when the user picks
+/// a section, with the same `markNeedRebuild` call the mixin makes.
+class HelpRoute extends HostRoute {
+  HelpRoute({required Iterable<String> topic, String? section})
+    : topic = List.unmodifiable(topic),
+      section = ValueNotifier(section);
+
+  final List<String> topic;
+  final ValueNotifier<String?> section;
+
+  @override
+  String get label => 'HelpRoute';
+
+  @override
+  List<Object?> get props => topic;
+
+  @override
+  Uri toUri() => AppCoordinator.manifest.location(
+    HostRouteId.help,
+    restParameters: {'topic': topic},
+    fragment: section.value,
+  );
+
+  @override
+  void onUpdate(covariant HelpRoute newRoute) {
+    super.onUpdate(newRoute);
+    section.value = newRoute.section.value;
+  }
+
+  @override
+  Widget build(covariant AppCoordinator coordinator, BuildContext context) =>
+      HelpPage(route: this, coordinator: coordinator);
+}
+
+/// What no manifest matches. [RouteNotFound] marks it, so a resolution of
+/// its URL reports not-found status while the page keeps the URL asked for.
+class NotFoundRoute extends HostRoute with RouteNotFound {
   NotFoundRoute(this.uri);
 
   final Uri uri;
@@ -462,6 +548,17 @@ class HubPage extends StatelessWidget {
                 'RequireSession › RequireTwoFactor',
             onTap: () => c.push(SecuritySettingsRoute()),
           ),
+          const _Section('Host: a layout-less route lands on the root stack'),
+          _Link(
+            id: 'help',
+            title: 'Help',
+            subtitle:
+                '/help/rules/order#stop · HelpRoute · OnboardingGate only · a '
+                'rest parameter and a fragment',
+            onTap: () => c.push(
+              HelpRoute(topic: const ['rules', 'order'], section: 'stop'),
+            ),
+          ),
           const _Section('Session'),
           _Link(
             id: 'start-over',
@@ -477,6 +574,78 @@ class HubPage extends StatelessWidget {
       ),
     );
   }
+}
+
+class HelpPage extends StatelessWidget {
+  const HelpPage({required this.route, required this.coordinator, super.key});
+
+  final HelpRoute route;
+  final AppCoordinator coordinator;
+
+  /// The sections a fragment can name.
+  static const sections = [
+    (
+      'scope',
+      'Scope',
+      'A module\'s rules gate what lands in the stacks it lists in paths.',
+    ),
+    (
+      'order',
+      'Order',
+      'The root first, then each enclosing module, then the owner, then '
+          'the route\'s own rules.',
+    ),
+    (
+      'stop',
+      'Stop',
+      'A stop cancels the navigation and leaves the screen as it was.',
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Help')),
+    body: ValueListenableBuilder<String?>(
+      valueListenable: route.section,
+      builder: (context, section, _) => ListView(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            child: Text(
+              'Help · ${route.topic.isEmpty ? 'contents' : route.topic.join(' › ')}',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+          ),
+          const _Blurb(
+            'A layout-less route: it lands on the root stack, so only '
+            'OnboardingGate gates it. The topic is a rest parameter, and the '
+            'section is the URL fragment.',
+          ),
+          for (final (slug, title, text) in sections)
+            ListTile(
+              key: Key(
+                slug == section
+                    ? 'help-section-$slug-selected'
+                    : 'help-section-$slug',
+              ),
+              selected: slug == section,
+              leading: Icon(slug == section ? Icons.bookmark : Icons.tag),
+              title: Text(title),
+              subtitle: Text(text),
+              onTap: () {
+                // Another section is the same page: rewrite the URL in
+                // place, without a new history entry.
+                route.section.value = slug;
+                coordinator.markNeedRebuild(
+                  historyIntent: NavigationHistoryIntent.replace,
+                );
+              },
+            ),
+        ],
+      ),
+    ),
+  );
 }
 
 class OnboardingPage extends StatelessWidget {
@@ -509,7 +678,7 @@ class OnboardingPage extends StatelessWidget {
             key: const Key('finish-onboarding'),
             onPressed: () {
               host.onboarded.value = true;
-              final next = host.resumeAfterOnboarding ?? Uri.parse('/');
+              final next = host.resumeAfterOnboarding ?? HubRoute().toUri();
               host.resumeAfterOnboarding = null;
               coordinator.pushReplacementUri(next);
             },

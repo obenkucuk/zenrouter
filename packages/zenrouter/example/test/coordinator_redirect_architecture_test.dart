@@ -92,6 +92,14 @@ String codeOf(String line) {
   return line;
 }
 
+/// Every line of [source] whose code matches URL segments by hand, as
+/// `file:line: code`. Comments do not count.
+List<String> handParsingOf(String file, String source) => [
+  for (final (index, line) in source.split('\n').indexed)
+    if (RegExp(r'\bpathSegments\b').hasMatch(codeOf(line)))
+      '$file:${index + 1}: ${line.trim()}',
+];
+
 /// Every line of [source] whose code reads `runtimeType`, as
 /// `file:line: code`. Comments do not count.
 List<String> runtimeTypeUsesOf(String file, String source) => [
@@ -228,6 +236,39 @@ import '../coordinator_redirect/app_module.dart'
       '$moduleDir/auth_module.dart',
       'lib/main.dart',
       appModule,
+    ]);
+  });
+
+  test('every file in $moduleDir declares its routing as a RouteManifest, '
+      'and none matches URL segments by hand', () {
+    for (final file in dartFilesUnder(moduleDir)) {
+      final source = File(file).readAsStringSync();
+      expect(
+        source,
+        contains('static final manifest = RouteManifest<'),
+        reason: '$file owns its routing graph',
+      );
+      expect(
+        handParsingOf(file, source),
+        isEmpty,
+        reason:
+            'A manifest matches URLs and builds them back; a switch on '
+            'pathSegments is a second source of truth.',
+      );
+    }
+  });
+
+  test('the hand-parsing check names the file and the line, and skips '
+      'comments', () {
+    const file = '$moduleDir/shop_module.dart';
+    const source = '''
+// A comment may say pathSegments.
+return switch (uri.pathSegments) {
+final manifest = RouteManifest<ShopRouteId>(name: 'shop');
+''';
+
+    expect(handParsingOf(file, source), [
+      '$file:2: return switch (uri.pathSegments) {',
     ]);
   });
 

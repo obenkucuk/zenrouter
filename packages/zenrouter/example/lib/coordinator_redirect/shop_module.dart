@@ -11,6 +11,11 @@
 // selected tab. It never redirects out of the tab set: a path cannot follow
 // such a redirect.
 //
+// The module owns its routing as a RouteManifest: an indexed shell whose
+// fixed children are the tabs, in tab order. RouteModuleBinding matches URLs
+// against it, the bindings turn a match into a tab, and toUri builds the same
+// URL back from it, so there is no parser to keep in step.
+//
 // This file imports only flutter and zenrouter. Its state (ShopAccount) and
 // the trace come from the host, through the constructor. A link to another
 // feature goes by URI.
@@ -26,9 +31,59 @@ class ShopAccount {
   void reset() => subscribed.value = false;
 }
 
+/// The IDs of this module's manifest: its shell, then its tabs.
+enum ShopRouteId { shell, home, catalog, billing }
+
 class ShopModule extends RouteModule<RouteUnique>
-    with RouteModuleRedirectRule<RouteUnique> {
+    with
+        RouteModuleBinding<RouteUnique, ShopRouteId>,
+        RouteModuleRedirectRule<RouteUnique> {
   ShopModule(super.coordinator, {required this.account, required this.trace});
+
+  /// The module's routing graph. An indexed layout lists its tabs as fixed
+  /// children, in the order [tabs] holds them.
+  static final manifest = RouteManifest<ShopRouteId>(
+    name: 'shop',
+    idCodec: RouteIdCodec.enumValues(ShopRouteId.values),
+    layouts: [
+      RouteManifestLayout.indexed(
+        id: ShopRouteId.shell,
+        path: '/shop',
+        childIds: [ShopRouteId.home, ShopRouteId.catalog, ShopRouteId.billing],
+      ),
+    ],
+    routes: [
+      RouteManifestRoute(
+        id: ShopRouteId.home,
+        path: '/shop',
+        parentId: ShopRouteId.shell,
+      ),
+      RouteManifestRoute(
+        id: ShopRouteId.catalog,
+        path: '/shop/catalog',
+        parentId: ShopRouteId.shell,
+      ),
+      RouteManifestRoute(
+        id: ShopRouteId.billing,
+        path: '/shop/billing',
+        parentId: ShopRouteId.shell,
+      ),
+    ],
+  );
+
+  /// From a manifest match to a tab. No `notFound`: a URL this module does
+  /// not own falls through to the next module.
+  @override
+  late final routeBindings = manifest.bind<RouteUnique>(
+    bindings: [
+      RouteBinding(id: ShopRouteId.home, create: (_) => HomeTab()),
+      RouteBinding(
+        id: ShopRouteId.catalog,
+        create: (match) => CatalogTab(queries: match.uri.queryParameters),
+      ),
+      RouteBinding(id: ShopRouteId.billing, create: (_) => BillingTab()),
+    ],
+  );
 
   final ShopAccount account;
   final void Function(String line) trace;
@@ -49,14 +104,6 @@ class ShopModule extends RouteModule<RouteUnique>
   /// The stack this module owns, and so the stack its rules gate.
   @override
   List<StackPath> get paths => [tabs];
-
-  @override
-  RouteUnique? parseRouteFromUri(Uri uri) => switch (uri.pathSegments) {
-    ['shop'] => HomeTab(),
-    ['shop', 'catalog'] => CatalogTab(),
-    ['shop', 'billing'] => BillingTab(),
-    _ => null,
-  };
 }
 
 ShopModule _shopOf(CoordinatorCore coordinator) =>
@@ -165,7 +212,7 @@ class HomeTab extends ShopRoute {
   String get label => 'HomeTab';
 
   @override
-  Uri toUri() => Uri.parse('/shop');
+  Uri toUri() => ShopModule.manifest.location(ShopRouteId.home);
 
   @override
   Widget build(covariant Coordinator coordinator, BuildContext context) {
@@ -204,18 +251,70 @@ class HomeTab extends ShopRoute {
   }
 }
 
-class CatalogTab extends ShopRoute {
+/// The catalog keeps its sort order in the URL query: `/shop/catalog?sort=price`.
+///
+/// [RouteQueryParameters] keeps the query out of the route's identity, so
+/// another sort order is the same tab. A query typed into the address bar
+/// reaches the tab set's own entry through `onUpdate`, and the sort control
+/// rewrites the URL in place, without a new history entry.
+class CatalogTab extends ShopRoute with RouteQueryParameters {
+  CatalogTab({Map<String, String> queries = const {}})
+    : queryNotifier = ValueNotifier(queries);
+
+  static const sorts = ['name', 'price'];
+
+  @override
+  final ValueNotifier<Map<String, String>> queryNotifier;
+
   @override
   String get label => 'CatalogTab';
 
   @override
-  Uri toUri() => Uri.parse('/shop/catalog');
+  Uri toUri() => ShopModule.manifest.location(
+    ShopRouteId.catalog,
+    queryParameters: queries,
+  );
 
   @override
   Widget build(covariant Coordinator coordinator, BuildContext context) =>
-      const _Page(
+      _Page(
         heading: 'Catalog',
-        lines: ['OnboardingGate and SubscriptionGate let this tab through.'],
+        lines: const [
+          'OnboardingGate and SubscriptionGate let this tab through.',
+        ],
+        children: [
+          ValueListenableBuilder<Map<String, String>>(
+            valueListenable: queryNotifier,
+            builder: (context, queries, _) {
+              final sort = queries['sort'] ?? sorts.first;
+              return RadioGroup<String>(
+                groupValue: sort,
+                // Another sort order is the same tab: rewrite the URL in
+                // place, without a new history entry.
+                onChanged: (value) => updateQueries(
+                  coordinator,
+                  queries: {...queries, 'sort': value!},
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                      child: Text('Sorted by $sort'),
+                    ),
+                    for (final option in sorts)
+                      RadioListTile<String>(
+                        key: Key('catalog-sort-$option'),
+                        title: Text('Sort by $option'),
+                        subtitle: Text('/shop/catalog?sort=$option'),
+                        value: option,
+                      ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ],
       );
 }
 
@@ -224,7 +323,7 @@ class BillingTab extends ShopRoute {
   String get label => 'BillingTab';
 
   @override
-  Uri toUri() => Uri.parse('/shop/billing');
+  Uri toUri() => ShopModule.manifest.location(ShopRouteId.billing);
 
   @override
   Widget build(covariant Coordinator coordinator, BuildContext context) =>
