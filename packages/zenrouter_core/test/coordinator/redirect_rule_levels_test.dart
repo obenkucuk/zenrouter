@@ -755,9 +755,9 @@ void main() {
           'nested': <String>[],
           'auth': <String>[],
         });
-        // The rule's TypeError propagates. resolve discards only on its own
-        // errors, as upstream does, so the fresh route is not discarded.
-        expect([signIn.discards, pushed.discards], [0, 0]);
+        // The rule's TypeError propagates, and resolve discards the fresh
+        // route it abandons on the error, as it does on any other throw.
+        expect([signIn.discards, pushed.discards], [1, 1]);
       },
     );
   });

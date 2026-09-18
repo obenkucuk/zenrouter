@@ -147,10 +147,11 @@ Indexed manifest children must be **direct** children of that layout (`parentId`
 - **Tab switches resolve like every other navigation.** `IndexedStackPath.goToIndexed`, and so `BranchedStackPath.goToBranch`, resolves the entry through `RouteRedirect.resolve`. Two entries that redirect to each other, or an entry whose redirect returns an equal new instance, used to hang the switch: the cycle now throws `StateError`, and the equal instance switches to the entry. A wrong-type redirect throws `StateError`, where it was an `AssertionError` in debug and a `TypeError` in release.
 - **Redirect chains are bounded.** 3.0 caps one navigation at 20 moves (`RouteRedirect.maxRedirectHops`) and throws `StateError` on a cycle, where 2.x followed redirects without limit and a cycle hung. (3.0.0-beta.1 already had the cap; a chain that ends on a route returning itself from `redirect` now resolves after 20 moves, where beta.1 stopped at 19.)
 - **Live routes are not discarded.** A route that is on a stack, then re-resolved and stopped or redirected away, keeps its result pending.
+- **Abandoned routes are discarded once, and never the returned route.** A redirect to an equal new instance discards that instance. A rule or redirect that throws discards the route being resolved before the error propagates. A chain that comes back to a route it passed, such as gated → splash → gated, ends on that route with its result intact.
 
 #### Migration
 
-No app code changes. Tests that expected a tab-switch cycle to hang, or an `AssertionError` from a wrong-type tab redirect, now get a `StateError`.
+No app code changes. Tests that expected a tab-switch cycle to hang, or an `AssertionError` from a wrong-type tab redirect, now get a `StateError`. Tests that counted `onDiscard` on an equal redirect target, or on a route whose redirect throws, now see one discard.
 
 ### Browser back and pop guards
 

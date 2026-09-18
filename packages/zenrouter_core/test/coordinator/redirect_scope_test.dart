@@ -777,16 +777,13 @@ Future<String> cycleOutcome(CoordinatorCore coordinator) async {
 const hop20 =
     'resolved t, same terminal: true; 20 intermediates, each discarded once: '
     'true; terminal discards 0';
-// `resolve` discards a route as it moves away from it, as upstream does: the
-// route a failed move would have gone to is not discarded (terminal discards
-// 0), and a route a cycle comes back to is discarded again (not once each).
 const hop21 =
     'threw RouteRedirect loop detected after 20 hops starting from '
     'AppRoute(c0); 21 intermediates, each discarded once: true; terminal '
-    'discards 0';
+    'discards 1';
 const cycle =
     'threw RouteRedirect loop detected after 2 hops starting from '
-    'AppRoute(a); 4 routes, each discarded once: false';
+    'AppRoute(a); 4 routes, each discarded once: true';
 
 /// Navigation on the root stack only, described by its observable effects.
 Future<Map<String, Object?>> rootStackScript(ModularAppCoordinator app) async {
@@ -1227,41 +1224,50 @@ void main() {
       },
     );
 
-    test('C8 (O6) a cross-module ping-pong throws', () async {
-      final f = Fixture();
-      final created = <CountingRoute>[];
-      CountingRoute newCart() {
-        final route = CountingRoute('cart', parentLayoutKey: 'shopShell');
-        created.add(route);
-        return route;
-      }
+    test(
+      'C8 (O6) a cross-module ping-pong throws and discards every fresh route exactly once',
+      () async {
+        final f = Fixture();
+        final created = <CountingRoute>[];
+        CountingRoute newCart() {
+          final route = CountingRoute('cart', parentLayoutKey: 'shopShell');
+          created.add(route);
+          return route;
+        }
 
-      RuledAppRoute newPost() {
-        final route = RuledAppRoute('post', [
-          ToRule(newCart),
-        ], parentLayoutKey: 'feedShell');
-        created.add(route);
-        return route;
-      }
+        RuledAppRoute newPost() {
+          final route = RuledAppRoute('post', [
+            ToRule(newCart),
+          ], parentLayoutKey: 'feedShell');
+          created.add(route);
+          return route;
+        }
 
-      f.shopRule.outcome = (r) => r.id == 'cart'
-          ? RedirectResult.redirectTo(newPost())
-          : const RedirectResult.continueRedirect();
+        f.shopRule.outcome = (r) => r.id == 'cart'
+            ? RedirectResult.redirectTo(newPost())
+            : const RedirectResult.continueRedirect();
 
-      await expectLater(
-        f.app.pushSilently(newCart()),
-        throwsStateErrorWith(['RouteRedirect loop detected after 2 hops']),
-      );
+        await expectLater(
+          f.app.pushSilently(newCart()),
+          throwsStateErrorWith(['RouteRedirect loop detected after 2 hops']),
+        );
 
-      expect(f.log, [
-        'app(cart)',
-        'shop(cart)',
-        'app(post)',
-        'app(cart)',
-        'shop(cart)',
-      ]);
-      expect(stacksOf(f.app), c1Stacks());
-    });
+        expect(f.log, [
+          'app(cart)',
+          'shop(cart)',
+          'app(post)',
+          'app(cart)',
+          'shop(cart)',
+        ]);
+        expect(created.map((r) => '${r.id}:${r.discards}'), [
+          'cart:1',
+          'post:1',
+          'cart:1',
+          'post:1',
+        ]);
+        expect(stacksOf(f.app), c1Stacks());
+      },
+    );
 
     test('C9 (O7) layout parents are never offered to any chain', () async {
       final f = Fixture();
@@ -1595,6 +1601,110 @@ void main() {
     );
 
     test(
+      'C an equal new instance from a route redirect ends the chain on the request and is discarded once, in an opted-out tree',
+      () async {
+        final p = PlainFixture();
+        final created = <EchoRoute>[];
+        final request = EchoRoute('echo', created);
+
+        final resolved = await RouteRedirect.resolve<AppRoute>(request, p.app);
+
+        expect(resolved, same(request));
+        expect(created, hasLength(1));
+        expect(created.single, equals(request));
+        expect(created.single.discards, 1);
+        expect(request.discards, 0);
+        expect(stacksOf(p.app), c1Stacks());
+      },
+    );
+
+    test(
+      'C an equal new instance from a module rule ends the chain on the request and is discarded once',
+      () async {
+        final f = Fixture();
+        final request = CountingRoute('profile', parentLayoutKey: 'authShell');
+        final fresh = <CountingRoute>[];
+        f.authRule.outcome = (route) {
+          final echo = CountingRoute('profile', parentLayoutKey: 'authShell');
+          fresh.add(echo);
+          return RedirectResult.redirectTo(echo);
+        };
+
+        final resolved = await RouteRedirect.resolve<AppRoute>(request, f.app);
+
+        expect(resolved, same(request));
+        expect(f.log, ['app(profile)', 'auth(profile)']);
+        expect(fresh, hasLength(1));
+        expect(fresh.single, equals(request));
+        expect(fresh.single.discards, 1);
+        expect(request.discards, 0);
+        expect(stacksOf(f.app), c1Stacks());
+      },
+    );
+
+    test(
+      'C a module rule that throws discards the routes the chain abandoned, the request included',
+      () async {
+        final f = Fixture();
+        f.authRule.outcome = (route) => throw ArgumentError('boom');
+        final request = CountingRoute('profile', parentLayoutKey: 'authShell');
+
+        await expectLater(
+          RouteRedirect.resolve<AppRoute>(request, f.app),
+          throwsArgumentError,
+        );
+        expect(f.log, ['app(profile)', 'auth(profile)']);
+        expect(request.discards, 1);
+
+        // Thrown on the second pass: the route moved away from and the
+        // current target are each discarded once.
+        f.log.clear();
+        final signIns = <CountingRoute>[];
+        f.authRule.outcome = (route) {
+          if (route.id == 'sign-in') throw ArgumentError('boom');
+          final signIn = CountingRoute('sign-in', parentLayoutKey: 'authShell');
+          signIns.add(signIn);
+          return RedirectResult.redirectTo(signIn);
+        };
+        final pushed = CountingRoute('profile', parentLayoutKey: 'authShell');
+
+        await expectLater(f.app.pushSilently(pushed), throwsArgumentError);
+        expect(f.log, [
+          'app(profile)',
+          'auth(profile)',
+          'app(sign-in)',
+          'auth(sign-in)',
+        ]);
+        expect(pushed.discards, 1);
+        expect(signIns.single.discards, 1);
+        expect(stacksOf(f.app), c1Stacks());
+      },
+    );
+
+    test(
+      'C a route redirect that throws discards the routes the chain abandoned, in an opted-out tree',
+      () async {
+        final p = PlainFixture();
+        final request = ThrowingRoute('boom', ArgumentError('boom'));
+
+        await expectLater(
+          RouteRedirect.resolve<AppRoute>(request, p.app),
+          throwsArgumentError,
+        );
+        expect(request.discards, 1);
+
+        late ThrowingRoute thrower;
+        final alias = AliasRoute(
+          'alias',
+          to: () => thrower = ThrowingRoute('boom', ArgumentError('boom')),
+        );
+        await expectLater(p.app.pushSilently(alias), throwsArgumentError);
+        expect([alias.calls, alias.discards, thrower.discards], [1, 1, 1]);
+        expect(stacksOf(p.app), c1Stacks());
+      },
+    );
+
+    test(
       'C a NoSuchMethodError from a real module coordinator getter propagates instead of dropping every gate',
       () async {
         final log = <String>[];
@@ -1619,6 +1729,7 @@ void main() {
           throwsA(isA<NoSuchMethodError>()),
         );
         expect(log, isEmpty);
+        expect(route.discards, 1);
         expect(app.root.stack, isEmpty);
       },
     );
@@ -2694,73 +2805,136 @@ void main() {
   // =========================================================================
   // B-HOP: the budget matrix (brief override O-1)
   // =========================================================================
-  group(
-    'B-HOP the hop budget counts moves in every tree and for every terminal',
-    () {
-      final trees = <String, HopTree Function()>{
-        'opted out': optedOutTree,
-        'opted in with rules': optedInWithRules,
-        'opted in with an empty rule list': optedInEmpty,
-      };
-      final terminals = <String, (CountingRoute Function(), bool)>{
-        'a plain route': (() => CountingRoute('t'), false),
-        'a self-returning RouteRedirect': (() => SelfRedirectRoute('t'), false),
-        'a RouteRedirectRule route whose rules all continue': (
-          () => RuledAppRoute('t', [const ContinueRule()]),
-          false,
-        ),
-        'a plain route under a scoped rule that continues': (
-          () => CountingRoute('t', parentLayoutKey: 'modShell'),
-          true,
-        ),
-      };
+  group('B-HOP the hop budget counts moves in every tree and for every terminal', () {
+    final trees = <String, HopTree Function()>{
+      'opted out': optedOutTree,
+      'opted in with rules': optedInWithRules,
+      'opted in with an empty rule list': optedInEmpty,
+    };
+    final terminals = <String, (CountingRoute Function(), bool)>{
+      'a plain route': (() => CountingRoute('t'), false),
+      'a self-returning RouteRedirect': (() => SelfRedirectRoute('t'), false),
+      'a RouteRedirectRule route whose rules all continue': (
+        () => RuledAppRoute('t', [const ContinueRule()]),
+        false,
+      ),
+      'a plain route under a scoped rule that continues': (
+        () => CountingRoute('t', parentLayoutKey: 'modShell'),
+        true,
+      ),
+    };
 
-      for (final tree in trees.entries) {
-        for (final terminal in terminals.entries) {
-          test(
-            'B-HOP ${tree.key}, ending on ${terminal.key}: 20 moves resolve, 21 throw',
-            () async {
-              final t = tree.value();
-              final (build, scoped) = terminal.value;
-              final hasRules = tree.key == 'opted in with rules';
+    for (final tree in trees.entries) {
+      for (final terminal in terminals.entries) {
+        test(
+          'B-HOP ${tree.key}, ending on ${terminal.key}: 20 moves resolve, 21 throw',
+          () async {
+            final t = tree.value();
+            final (build, scoped) = terminal.value;
+            final hasRules = tree.key == 'opted in with rules';
 
-              expect(await hopOutcome(t.app, 20, build), hop20);
-              expect(t.log, [
-                if (hasRules) ...[
-                  for (var i = 0; i < 20; i++) 'app(c$i)',
-                  'app(t)',
-                  if (scoped) 'mod(t)',
-                ],
-              ]);
+            expect(await hopOutcome(t.app, 20, build), hop20);
+            expect(t.log, [
+              if (hasRules) ...[
+                for (var i = 0; i < 20; i++) 'app(c$i)',
+                'app(t)',
+                if (scoped) 'mod(t)',
+              ],
+            ]);
 
-              t.log.clear();
-              expect(await hopOutcome(t.app, 21, build), hop21);
-              expect(t.log, [
-                if (hasRules)
-                  for (var i = 0; i < 21; i++) 'app(c$i)',
-              ]);
+            t.log.clear();
+            expect(await hopOutcome(t.app, 21, build), hop21);
+            expect(t.log, [
+              if (hasRules)
+                for (var i = 0; i < 21; i++) 'app(c$i)',
+            ]);
 
-              expect(stacksOf(t.app), {
-                'root': <String>[],
-                'nested': <String>[],
-                'mod': <String>[],
-              }, reason: 'resolve alone commits nothing');
-            },
-          );
-        }
+            expect(stacksOf(t.app), {
+              'root': <String>[],
+              'nested': <String>[],
+              'mod': <String>[],
+            }, reason: 'resolve alone commits nothing');
+          },
+        );
+      }
 
-        test('B-HOP ${tree.key}: A → B → A throws', () async {
+      test('B-HOP ${tree.key}: A → B → A throws', () async {
+        final t = tree.value();
+        expect(await cycleOutcome(t.app), cycle);
+        expect(t.log, [
+          if (tree.key == 'opted in with rules') ...[
+            'app(a)',
+            'app(b)',
+            'app(a)',
+          ],
+        ]);
+      });
+
+      test(
+        'B-HOP ${tree.key}: a chain that comes back to its first route (gated → splash → gated) returns that route undiscarded',
+        () async {
           final t = tree.value();
-          expect(await cycleOutcome(t.app), cycle);
+          final gated = GatedRoute(
+            'gated',
+            SplashSession(),
+            parentLayoutKey: 'modShell',
+          );
+
+          final resolved = await RouteRedirect.resolve<AppRoute>(gated, t.app);
+
+          expect(resolved, same(gated));
+          expect(gated.discards, 0);
+          expect(gated.splashes.map((splash) => splash.discards), [1]);
           expect(t.log, [
             if (tree.key == 'opted in with rules') ...[
-              'app(a)',
-              'app(b)',
-              'app(a)',
+              'app(gated)',
+              'mod(gated)',
+              'app(splash)',
+              'app(gated)',
+              'mod(gated)',
             ],
           ]);
-        });
-      }
-    },
-  );
+          expect(stacksOf(t.app), {
+            'root': <String>[],
+            'nested': <String>[],
+            'mod': <String>[],
+          });
+        },
+      );
+
+      test(
+        'B-HOP ${tree.key}: a push that comes back to its first route keeps its result pending until the route is popped',
+        () async {
+          final t = tree.value();
+          final gated = GatedRoute(
+            'gated',
+            SplashSession(),
+            parentLayoutKey: 'modShell',
+          );
+          Object? value = 'pending';
+          unawaited(t.app.push<String>(gated).then((v) => value = v));
+          await settle();
+
+          expect(value, 'pending');
+          expect(gated.discards, 0);
+          expect(stacksOf(t.app), {
+            'root': ['modShell'],
+            'nested': <String>[],
+            'mod': ['gated'],
+          });
+
+          await (gated.stackPath! as AppStackPath).pop('result');
+          await settle();
+
+          expect(value, 'result');
+          expect(gated.splashes.single.discards, 1);
+          expect(stacksOf(t.app), {
+            'root': ['modShell'],
+            'nested': <String>[],
+            'mod': <String>[],
+          });
+        },
+      );
+    }
+  });
 }

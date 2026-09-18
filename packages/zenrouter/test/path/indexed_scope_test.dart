@@ -747,12 +747,13 @@ void main() {
       expect(path.activeRoute, same(b));
       expect(b.calls, 1);
       expect([home.discards, b.discards], [0, 0]);
-      // The value-equal instance ends the chain on the entry. resolve does not
-      // discard it, as upstream does not; pinned so a change is visible.
-      expect(created.single.discards, 0);
+      // The value-equal instance ends the chain on the entry. It is never
+      // shown, so resolve discards it once; the entry is not discarded.
+      expect(created.single.discards, 1);
     });
 
-    test('F2 a wrong-type redirect throws StateError', () async {
+    test('F2 a wrong-type redirect throws StateError and discards the fresh '
+        'target once', () async {
       final foreign = Dest('foreign');
       final a = NarrowTab('a');
       final b = WrongTypeTab('b', () => foreign);
@@ -770,6 +771,7 @@ void main() {
       );
 
       expect(path.activeIndex, 0);
+      expect(foreign.discards, 1);
       expect([a.discards, b.discards], [0, 0]);
     });
 

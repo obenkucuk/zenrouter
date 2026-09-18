@@ -247,7 +247,7 @@ void main() {
     });
 
     test(
-      'a root rule redirecting to the wrong route type throws and discards the source',
+      'a root rule redirecting to the wrong route type throws and discards both',
       () async {
         final other = DiscardCountingRoute('other');
         final coordinator = GatedCoordinator([
@@ -270,6 +270,11 @@ void main() {
           ),
         );
         expect(source.discards, 1);
+        expect(
+          other.discards,
+          1,
+          reason: 'the wrong-type target was never shown, so it is discarded',
+        );
       },
     );
 

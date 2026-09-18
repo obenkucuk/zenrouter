@@ -41,8 +41,11 @@ mixin RouteRedirect<T extends RouteTarget> on RouteTarget {
   /// - Runs the gating module rules, then the route's own redirect, once per
   ///   target, until a pass leaves the target where it is or cancels
   /// - Calls [redirectWith] if coordinator is available, otherwise [redirect]
-  /// - Handles route discarding for redirected-away routes, but never
-  ///   discards a route that is live on a stack
+  /// - Discards every route it redirects away from, cancels, or abandons on
+  ///   any error (a throwing rule or redirect included), at most once each,
+  ///   when the chain ends. The error still propagates. It never discards
+  ///   the route it returns, even when the chain came back to it, nor a
+  ///   route that is live on a stack
   /// - Throws [StateError] if a cycle is detected, the target moves more than
   ///   [maxRedirectHops] times, a redirect returns the wrong route type, or
   ///   the redirect scope of the coordinator's tree is misconfigured
@@ -50,59 +53,97 @@ mixin RouteRedirect<T extends RouteTarget> on RouteTarget {
     T route,
     CoordinatorCore? coordinator,
   ) async {
-    T target = route;
+    Set<RouteTarget>? discarded;
+    void discard(RouteTarget abandoned) {
+      // Never discard a live stack member: a tab entry, or a re-navigated or
+      // restored route, would have its result completed while on screen.
+      if (abandoned.stackPath != null) return;
+      if (!(discarded ??= Set<RouteTarget>.identity()).add(abandoned)) return;
+      abandoned.onDiscard();
+    }
+
     final RouteModuleTree? tree;
     try {
       tree = coordinator?.moduleTreeUsingRedirectRules;
-    } on StateError {
-      _discard(target);
+    } catch (_) {
+      discard(route);
       rethrow;
     }
+
+    T target = route;
     final seen = <RouteTarget>{};
     var hops = 0;
+    // The targets the chain moved away from. They are discarded only once
+    // the chain ends, and never the route it returns: a chain may come back
+    // to one of them (gated → splash → gated).
+    final movedFrom = <RouteTarget>[];
+    void discardMovedFrom({RouteTarget? except}) {
+      for (final abandoned in movedFrom) {
+        if (!identical(abandoned, except)) discard(abandoned);
+      }
+    }
+
     // No await before the first rule or redirectWith call: callers may read
     // a rule's effects synchronously after starting a navigation.
     while (true) {
       final List<RouteModuleRedirectRule> lineage;
       try {
         lineage = tree?.redirectLineageOf(target) ?? const [];
-      } on StateError {
-        _discard(target);
+      } catch (_) {
+        discardMovedFrom();
+        discard(target);
         rethrow;
       }
       if (target is! RouteRedirect && lineage.isEmpty) break;
 
-      final next = await _redirectOnce(target, coordinator, tree, lineage);
+      final RouteTarget? next;
+      try {
+        next = await _redirectOnce(target, coordinator, tree, lineage);
+      } catch (_) {
+        // A throwing rule or redirect abandons the chain: discard what it
+        // leaves behind, then let the error through.
+        discardMovedFrom();
+        discard(target);
+        rethrow;
+      }
       if (next == null) {
-        _discard(target);
+        discardMovedFrom();
+        discard(target);
         return null;
       }
-      if (next == target) break;
+
+      if (next == target) {
+        // An equal new instance ends the chain on the current target. It is
+        // never shown, so it is discarded.
+        if (!identical(next, target)) discard(next);
+        break;
+      }
+
       if (next is! T) {
-        _discard(target);
+        discardMovedFrom();
+        discard(target);
+        discard(next);
         throw StateError(
           'RouteRedirect returned ${next.runtimeType}, expected $T. '
           'Redirect destinations must be the same route type as the source.',
         );
       }
+
       if (!seen.add(target) || hops >= maxRedirectHops) {
-        _discard(target);
+        discardMovedFrom();
+        discard(target);
+        discard(next);
         throw StateError(
           'RouteRedirect loop detected after $hops hops starting from $route',
         );
       }
       hops += 1;
-      _discard(target);
+
+      movedFrom.add(target);
       target = next;
     }
+    discardMovedFrom(except: target);
     return target;
-  }
-
-  /// Discards [route], which the chain leaves behind, unless it is live on a
-  /// stack: a tab entry or a re-navigated route would have its result
-  /// completed while on screen.
-  static void _discard(RouteTarget route) {
-    if (route.stackPath == null) route.onDiscard();
   }
 
   /// Runs one pass for [target]: the gating module rules in [lineage] first,

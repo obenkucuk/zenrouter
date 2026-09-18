@@ -214,6 +214,23 @@ void main() {
         expect(app.root.stack, [same(live)]);
       },
     );
+
+    test(
+      'an identical-instance cycle discards each route exactly once',
+      () async {
+        final a = _CountingCyclicRoute('a');
+        final b = _CountingCyclicRoute('b');
+        a.next = b;
+        b.next = a;
+
+        await expectLater(
+          () => RouteRedirect.resolve<BaseRoute>(a, null),
+          throwsA(isA<StateError>()),
+        );
+        expect(a.discards, 1);
+        expect(b.discards, 1);
+      },
+    );
   });
 }
 
@@ -258,4 +275,21 @@ class _TrackingRedirectRoute extends TrackingRoute
   @override
   FutureOr<AppRoute?> redirectWith(covariant CoordinatorCore coordinator) =>
       stop ? null : (to ?? this);
+}
+
+/// [_CyclicRedirectRoute] that counts its discards.
+class _CountingCyclicRoute extends BaseRoute with RouteRedirect<BaseRoute> {
+  _CountingCyclicRoute(super.id);
+
+  late BaseRoute next;
+  int discards = 0;
+
+  @override
+  BaseRoute redirect() => next;
+
+  @override
+  void onDiscard() {
+    discards++;
+    super.onDiscard();
+  }
 }

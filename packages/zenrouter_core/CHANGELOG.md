@@ -44,14 +44,36 @@
   `redirectWith`: it now resolves after 20 moves, where 3.0.0-beta.1
   stopped at 19. Other chains keep their limit. A cycle is now detected when
   the repeated route redirects again, and the limit when the 21st move is
-  made, after that redirect has run. The error message is unchanged.
+  made: that redirect has run, and the route it returned is discarded. The
+  error message is unchanged.
 
 ### Fixes
 
 - **`RouteRedirect.resolve` never discards a live route.** A route that is
   bound to a stack and is re-resolved, then stopped or redirected away,
   keeps its result pending instead of being completed with `null` while on
-  screen.
+  screen. Every other abandoned route is discarded at most once, including
+  the fresh target of a redirect that fails with a loop or wrong-type
+  `StateError`.
+- **A redirect chain that comes back to a route it passed ends on that
+  route, intact.** A chain such as gated → splash → gated, where the splash
+  finishes initialising and forwards to the original route, now resolves to
+  that same instance without discarding it, so its push result is still
+  delivered when it is popped. 3.0.0-beta.1 threw a loop `StateError` for
+  this chain. Routes the chain moved away from are discarded once it ends,
+  never the route it returns.
+- **A redirect to an equal new instance discards that instance.** When a
+  rule or a route's own redirect returns a new route equal to the current
+  target, the chain still ends on the current target, and the new
+  instance, which is never shown, is now discarded once instead of being
+  dropped without `onDiscard`.
+- **A redirect that throws discards the routes it abandons.** When a rule,
+  a route's own `redirect` or `redirectWith`, or a parent layout's
+  `resolvePath` throws while a destination resolves, the error still
+  propagates, and the route being resolved, plus any route the chain moved
+  away from, is now discarded once. Before, only the `StateError`s that
+  `resolve` raises itself discarded them. This also applies to trees in
+  which no module mixes in `RouteModuleRedirectRule`.
 
 ## 3.0.0-beta.1
 

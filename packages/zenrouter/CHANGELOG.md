@@ -25,14 +25,15 @@
   - Two entries that redirect to each other throw `StateError` instead of
     hanging.
   - An entry whose redirect returns an equal new instance switches to that
-    entry instead of hanging.
+    entry instead of hanging, and the new instance is discarded.
   - A redirect to a route of the wrong type throws `StateError`. It was an
     `AssertionError` in debug and a `TypeError` in release.
   - An entry with a redirect of its own, or gated by module rules, switches
     once its redirects resolve, no longer synchronously.
   - Entries are still never discarded, even when a redirect stops or leaves
-    them. After a redirect out of the entries, the route the redirect created
-    is discarded; it used to be left undiscarded.
+    them. A route a redirect created and that is not shown is discarded
+    once; after a redirect out of the entries it used to be left
+    undiscarded.
   - A redirect out of the entries still cancels the switch. When module rules
     gate the entry, it also asserts in debug and points to
     `coordinator.navigate` or `push`, which can land the redirect.
