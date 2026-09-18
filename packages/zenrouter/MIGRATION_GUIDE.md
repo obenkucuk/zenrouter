@@ -136,6 +136,22 @@ Do not put mutable lifecycle state in `props`. Delete any `internalProps` overri
 
 Indexed manifest children must be **direct** children of that layout (`parentId` matches). Branched children must be layouts declared on the parent.
 
+### Optional: module-scoped redirect rules
+
+3.0 adds `RouteModuleRedirectRule`, an opt-in mixin for the root coordinator, a module coordinator or a `RouteModule`. Its `redirectRules` gate every route that lands in the module's stacks; on the root, every route. It is not one of the capability mixins above: `Coordinator` does not mix it in, and a tree without it needs no change. To move app-wide rules off a route base's `redirectRules` getter, see [One RedirectRule, two levels](doc/guides/coordinator-as-module.md#one-redirectrule-two-levels).
+
+### Redirect resolution
+
+#### Changes
+
+- **Tab switches resolve like every other navigation.** `IndexedStackPath.goToIndexed`, and so `BranchedStackPath.goToBranch`, resolves the entry through `RouteRedirect.resolve`. Two entries that redirect to each other, or an entry whose redirect returns an equal new instance, used to hang the switch: the cycle now throws `StateError`, and the equal instance switches to the entry. A wrong-type redirect throws `StateError`, where it was an `AssertionError` in debug and a `TypeError` in release.
+- **Redirect chains are bounded.** 3.0 caps one navigation at 20 moves (`RouteRedirect.maxRedirectHops`) and throws `StateError` on a cycle, where 2.x followed redirects without limit and a cycle hung. (3.0.0-beta.1 already had the cap; a chain that ends on a route returning itself from `redirect` now resolves after 20 moves, where beta.1 stopped at 19.)
+- **Live routes are not discarded.** A route that is on a stack, then re-resolved and stopped or redirected away, keeps its result pending.
+
+#### Migration
+
+No app code changes. Tests that expected a tab-switch cycle to hang, or an `AssertionError` from a wrong-type tab redirect, now get a `StateError`.
+
 ### Browser back and pop guards
 
 A traversal that a `RouteGuard` blocks now **replaces** the current history entry with the app URI when it differs from the engine URI. Flutter's `RouteInformationReportingType.none` still reports to the engine and would otherwise **push** a new entry, looping the back button.

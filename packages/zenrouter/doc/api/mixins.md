@@ -26,6 +26,7 @@ Each mixin adds specific capabilities:
 - **RouteGuardRule** - Composable pop-guard rules (works with RouteGuard)
 - **RouteRedirect** - Redirects to different routes
 - **RouteRedirectRule** - Composable redirect rules (works with RouteRedirect)
+- **RouteModuleRedirectRule** - Redirect rules on a module or the root coordinator, for every route that lands in its stacks
 - **RouteDeepLink** - Custom deep link handling
 - **RouteQueryParameters** - Efficiently handle query parameters
 
@@ -45,6 +46,8 @@ Which mixins do I need?
 │  └─ No → Continue
 │
 ├─ Conditional routing (auth, permissions)?
+│  ├─ Same rules for every route of a module, or of the app?
+│  │  └─ Yes → Add RouteModuleRedirectRule to the module or root coordinator ✓
 │  ├─ Need reusable/composable rules?
 │  │  ├─ Yes → Add RouteRedirect + RouteRedirectRule ✓
 │  │  └─ No → Add RouteRedirect ✓
@@ -679,6 +682,8 @@ coordinator.push(RouteA());
 // Internal flow: RouteA → RouteB → RouteC
 ```
 
+One navigation may move its target at most `RouteRedirect.maxRedirectHops` (20) times. A cycle (`A → B → A`) or a longer chain throws `StateError`.
+
 ---
 
 ### RouteRedirectRule
@@ -970,6 +975,106 @@ class RateLimitRule extends RedirectRule<AppRoute> {
 - Create rules that depend on execution order unnecessarily
 - Mix route-specific logic with reusable rules
 - Return `null` from rules (use `StopRedirect` instead)
+
+---
+
+### RouteModuleRedirectRule
+
+Redirect rules that belong to a module instead of a route. Mix it into the root coordinator, a coordinator used as a module, or a plain `RouteModule`. Its `redirectRules` gate every destination that lands in a stack the module lists in `paths`, or in a stack of one of its sub-modules. The root lists every stack, so the root's rules gate every destination.
+
+**Use when:**
+- An app-wide gate (onboarding, session) must run for every destination: mix it into the root coordinator
+- A feature gate must run for every page of one feature, and for no other feature's pages: mix it into that feature's module
+
+#### API
+
+```dart
+mixin RouteModuleRedirectRule<T extends RouteUri> on RouteModule<T> {
+  /// Rules for destinations landing in this module's stacks, in order.
+  ///
+  /// Read on every resolution pass, so cache the list (`late final`).
+  List<RedirectRule> get redirectRules;
+}
+```
+
+`redirectScopeOf`, available on every coordinator of the tree, returns the modules whose rules gate a destination, in the order they run:
+
+```dart
+final List<RouteModuleRedirectRule> chain =
+    coordinator.redirectScopeOf(ProfileRoute());
+```
+
+#### Example: A Feature Gate
+
+```dart
+class ShopModule extends RouteModule<AppRoute>
+    with RouteModuleRedirectRule<AppRoute> {
+  ShopModule(super.coordinator, {required this.account});
+
+  final ShopAccount account;
+
+  @override
+  late final List<RedirectRule> redirectRules = [CheckBalanceRule(account)];
+
+  late final shopStack = NavigationPath<AppRoute>.createWith(
+    label: 'shop',
+    coordinator: coordinator,
+  )..bindLayout(ShopLayout.new);
+
+  @override
+  List<StackPath> get paths => [shopStack];
+
+  @override
+  AppRoute? parseRouteFromUri(Uri uri) => switch (uri.pathSegments) {
+    ['shop'] => ShopHomeRoute(),
+    ['shop', 'checkout'] => CheckoutRoute(),
+    _ => null,
+  };
+}
+
+class CheckBalanceRule extends RedirectRule<AppRoute> {
+  CheckBalanceRule(this.account);
+
+  final ShopAccount account;
+
+  @override
+  RedirectResult<AppRoute> redirectResult(
+    covariant CoordinatorCore coordinator,
+    AppRoute route,
+  ) {
+    if (route is CheckoutRoute && account.balance <= 0) {
+      return const RedirectResult.stop();
+    }
+    return const RedirectResult.continueRedirect();
+  }
+}
+```
+
+`ShopHomeRoute` and `CheckoutRoute` use `ShopLayout`, so they land in `shopStack` and `CheckBalanceRule` sees them, whether they are pushed through the root, through another module or through `shopStack.push`, or opened from a deep link. A route of a sibling module never reaches the rule.
+
+#### Rule Execution Order
+
+```
+1. The root's redirectRules                (every destination)
+2. Each enclosing module's redirectRules   (outer to inner; modules with the mixin only)
+3. The owning module's redirectRules
+4. The route's own RouteRedirect / RouteRedirectRule
+```
+
+The first `StopRedirect` or `RedirectTo` wins. A `RedirectTo` target starts again at the top of its own chain. Layout parents are never offered to module rules.
+
+#### RouteModuleRedirectRule vs RouteRedirectRule
+
+| | `RouteRedirectRule` | `RouteModuleRedirectRule` |
+|---|---|---|
+| Mixed into | a route | the root coordinator, a module coordinator, or a `RouteModule` |
+| Gates | that route | every destination that lands in the module's stacks |
+| Runs | last | before the route's own rules, root first |
+| `coordinator` argument | the call site | the tree root |
+
+Both use the same `RedirectRule` class and `RedirectResult`s. A module rule receives the tree root, so capture module state at construction, as `CheckBalanceRule(account)` does. Type a module rule to the base its stacks host: a rule typed to a single route throws a `TypeError` when the module offers it a sibling.
+
+See [Redirect rules scoped to a module](../guides/coordinator-as-module.md#redirect-rules-scoped-to-a-module) for scope, tabs, failure handling, and a migration from a route-base `redirectRules` getter.
 
 ---
 

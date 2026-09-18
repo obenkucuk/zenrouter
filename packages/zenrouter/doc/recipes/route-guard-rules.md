@@ -142,9 +142,11 @@ test('UnsavedChangesRule blocks when dirty and dialog declines', () async {
 | Same leave logic on many routes | `RouteGuardRule` + shared `GuardRule`s |
 | Free predictive back when clean | `canPop` + `canPopListenable` |
 | Block opening a route (auth) | `RouteRedirect` / `RouteRedirectRule` |
+| Block opening every route of a module, or of the app | `RouteModuleRedirectRule` on the module or root coordinator |
 
 ## Related
 
 - [Authentication Flow](authentication-flow.md) — entry redirects
+- [Redirect rules scoped to a module](../guides/coordinator-as-module.md#redirect-rules-scoped-to-a-module) — entry redirects for every route of a module
 - [Mixins API — RouteGuard / RouteGuardRule](../api/mixins.md)
 - [ADVANCED.md — GuardRule](../../../skills/zenrouter/ADVANCED.md) (repo skill)

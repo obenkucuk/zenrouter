@@ -15,6 +15,10 @@ MaterialApp.router(
 Restoration applies the stack before the first frame, so parsing must be
 synchronous. Sync `RouteBinding` factories are sufficient.
 
+A root that mixes in `CoordinatorModular` parses asynchronously too: its
+`parseRouteFromUri` awaits each module in turn, so override
+`parseRouteFromUriSync` on it as well.
+
 If a factory is async (`RouteBinding.deferred`, or `await` in `create`),
 override `parseRouteFromUriSync`:
 

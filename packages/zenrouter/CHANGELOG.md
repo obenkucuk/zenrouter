@@ -1,5 +1,50 @@
 ## Unreleased
 
+### 🚀 New Features
+
+- **Module-scoped redirect rules gate tab switches.**
+  `RouteModuleRedirectRule` (from zenrouter_core, re-exported) gives the root
+  coordinator, a module coordinator or a `RouteModule` redirect rules for
+  every destination that lands in its stacks.
+  `IndexedStackPath.goToIndexed`, and so `BranchedStackPath.goToBranch`,
+  resolve the entry through `RouteRedirect.resolve` like every other entry
+  point, so the rules that gate the entry run on a tab switch, with the hop
+  budget and cycle detection. Branch roots are layouts and are never offered
+  to them.
+  - A gated entry switches once its rules resolve. An entry with neither a
+    redirect of its own nor gating rules still switches synchronously.
+  - A coordinator navigation to a tab entry resolves it twice, once for the
+    operation and once for the switch, so its rules run twice.
+  - See [Guide](doc/guides/coordinator-as-module.md#redirect-rules-scoped-to-a-module)
+    & `example/lib/main_coordinator_redirect.dart`
+
+### ⚠️ Breaking Changes
+
+- **`goToIndexed` resolves through `RouteRedirect.resolve`**, in every tree,
+  including trees without module rules:
+  - Two entries that redirect to each other throw `StateError` instead of
+    hanging.
+  - An entry whose redirect returns an equal new instance switches to that
+    entry instead of hanging.
+  - A redirect to a route of the wrong type throws `StateError`. It was an
+    `AssertionError` in debug and a `TypeError` in release.
+  - An entry with a redirect of its own, or gated by module rules, switches
+    once its redirects resolve, no longer synchronously.
+  - Entries are still never discarded, even when a redirect stops or leaves
+    them. After a redirect out of the entries, the route the redirect created
+    is discarded; it used to be left undiscarded.
+  - A redirect out of the entries still cancels the switch. When module rules
+    gate the entry, it also asserts in debug and points to
+    `coordinator.navigate` or `push`, which can land the redirect.
+- **A module rule list must be non-empty to gate a tab switch.** A module
+  that mixes in `RouteModuleRedirectRule` with an empty rule list gates
+  nothing: its entries switch synchronously, and an entry's own redirect out
+  of the tab set cancels silently, exactly as without the mixin.
+- **An entry of a module-owned tab set must declare the tab set's layout.**
+  One that does not lands on the root stack, so only the root's rules would
+  gate it; in debug, switching to it asserts, naming the modules whose rules
+  it would skip.
+
 ### 🐛 Fixes
 
 - **System back handling**: `CoordinatorRouterDelegate.popRoute()` now dispatches

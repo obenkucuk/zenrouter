@@ -436,12 +436,12 @@ final tabs = tabPath.stack;
 print('Total tabs: ${tabs.length}');
 ```
 
-#### `activePathIndex` → `int`
+#### `activeIndex` → `int`
 
 The index of the currently active route.
 
 ```dart
-print('Current tab: ${tabPath.activePathIndex}');
+print('Current tab: ${tabPath.activeIndex}');
 // 0 = first tab, 1 = second tab, etc.
 ```
 
@@ -458,11 +458,18 @@ print('Active: ${current.runtimeType}');
 
 #### `goToIndexed(int index)` → `Future<void>`
 
-Navigates to the route at the specified index.
+Switches to the entry at the specified index.
 
 **Consults guards:** If the current route has `RouteGuard`, it's consulted before switching.
 
-**Follows redirects:** If the target route has `RouteRedirect`, the redirect is followed.
+**Resolves redirects like every other navigation:** The entry goes through `RouteRedirect.resolve`: first the module redirect rules that gate it (see [`RouteModuleRedirectRule`](mixins.md#routemoduleredirectrule)), then its own `RouteRedirect`, with the hop budget and cycle detection.
+
+- A cancelled redirect (`null`, or `RedirectResult.stop()`) keeps the active index.
+- A redirect to another entry switches to that entry. An equal new instance counts as the entry.
+- A redirect out of the entries cancels the switch, because a path cannot navigate outside itself. When module rules gate the entry, this also asserts in debug. Stop, redirect to another entry, or send the tap through `coordinator.navigate` / `push` so the redirect can land.
+- Entries are never discarded.
+
+An entry with no redirect of its own and no gating module rules switches synchronously. Otherwise the switch lands once the redirects resolve, so `await` the call before reading `activeIndex`.
 
 **Example:**
 ```dart
@@ -483,7 +490,7 @@ class GuardedTab extends RouteTarget with RouteGuard {
 await tabPath.goToIndexed(2); // Guard is consulted first
 ```
 
-**Throws:** `StateError` if index is out of bounds.
+**Throws:** `StateError` if the index is out of bounds, if the redirects form a cycle or move the target more than `RouteRedirect.maxRedirectHops` times, if a redirect returns a route of the wrong type, or if the tree's redirect scope is misconfigured.
 
 #### `activateRoute(T route)` → `Future<void>`
 
@@ -559,6 +566,13 @@ Use `activeBranchIndex`, `activeBranch`, and `goToBranch(index)` for shell UI.
 Navigating directly to a route under another branch activates the necessary
 branch hierarchy automatically. The active branch index and every child path
 are included in coordinator restoration.
+
+Branch roots are layouts, so `goToBranch` offers nothing to module redirect
+rules. A route inside a branch is gated by the chain of the branch stack it
+lands in (see [`RouteModuleRedirectRule`](mixins.md#routemoduleredirectrule)).
+In a tree that uses those rules, the owning module lists the branched path
+and every branch child path in `paths`: a destination that lands in an
+unlisted stack throws `StateError`.
 
 ## NavigationStack Widget
 

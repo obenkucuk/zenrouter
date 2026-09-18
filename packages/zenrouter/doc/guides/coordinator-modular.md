@@ -192,8 +192,17 @@ class AccountModule extends RouteModule<AppRoute> {
 
 Prefer declaring the child in the module that owns the layout.
 
+## Redirect rules
+
+A module can gate its own routes. Mix `RouteModuleRedirectRule` into it and
+list `redirectRules`. They gate every destination that lands in a stack the
+module lists in `paths`, and nothing in a sibling module. Mixed into the
+root, they gate every destination. See
+[Redirect rules scoped to a module](coordinator-as-module.md#redirect-rules-scoped-to-a-module).
+
 ## See also
 
 - [Coordinator as RouteModule](coordinator-as-module.md)
+- [Redirect rules scoped to a module](coordinator-as-module.md#redirect-rules-scoped-to-a-module)
 - [Layouts](route-layout.md)
 - [`main_coordinator_module.dart`](../../example/lib/main_coordinator_module.dart)
