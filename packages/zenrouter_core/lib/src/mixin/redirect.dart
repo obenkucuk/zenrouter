@@ -18,7 +18,8 @@ import 'package:zenrouter_core/src/mixin/target.dart';
 /// 1. The module redirect rules that gate the target run first: the root's,
 ///    then each enclosing module's, then the owning module's (see
 ///    [RouteModuleRedirectRule]). A tree where no module declares rules has
-///    none, and layout parents are never offered to them.
+///    none, and layout parents are never offered to them. A module rule that
+///    redirects to the target itself moves nothing, so the next rule runs.
 /// 2. If every module rule continues, [redirectWith] (or [redirect]) runs.
 /// 3. A `null` result cancels the navigation. `this` proceeds to this route.
 ///    Another route starts a new pass with that route as the target.
@@ -84,6 +85,7 @@ mixin RouteRedirect<T extends RouteTarget> on RouteTarget {
           coordinator,
           tree?.root,
           lineage,
+          discard,
         );
         if (next == null) return null;
         if (next == target) {
@@ -125,11 +127,17 @@ mixin RouteRedirect<T extends RouteTarget> on RouteTarget {
   ///
   /// Module rules receive the tree [root]; the route's own redirect receives
   /// the call-site [coordinator], as it always has.
+  ///
+  /// A module rule that redirects to [target] itself moves nothing, so it
+  /// does not end the pass: a gate must not be skipped because a rule above
+  /// it handed the destination back. The rules below it still run, and an
+  /// equal new instance, which is never shown, goes to [discard].
   static Future<RouteTarget?> _redirectOnce(
     RouteTarget target,
     CoordinatorCore? coordinator,
     CoordinatorCore? root,
     List<RouteModuleRedirectRule> lineage,
+    void Function(RouteTarget abandoned) discard,
   ) async {
     for (final module in lineage) {
       for (final rule in module.redirectRules) {
@@ -139,7 +147,8 @@ mixin RouteRedirect<T extends RouteTarget> on RouteTarget {
           case ContinueRedirect():
             continue;
           case RedirectTo(:final route):
-            return route;
+            if (route != target) return route;
+            if (!identical(route, target)) discard(route);
         }
       }
     }

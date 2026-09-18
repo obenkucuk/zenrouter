@@ -13,7 +13,9 @@
   same chain. Rules run root first, then each enclosing module, then the
   owning module, then the route's own redirect; the first stop or redirect
   wins, and a redirect target is resolved again from the top of its own
-  chain. Layout parents are never offered, and rules receive the tree root
+  chain. A module rule that redirects to the destination itself moves
+  nothing, so the rules below it still run: an outer rule cannot switch an
+  inner gate off by handing the destination back. Layout parents are never offered, and rules receive the tree root
   as their coordinator. A tree in which no module mixes it in has no scoped
   rules.
 - **`redirectScopeOf(destination)`** on any coordinator of the tree returns
@@ -32,6 +34,9 @@
   navigating again to a route, or switching to a tab entry, that the owners
   of the stack it sits in would not gate. A declaring module missing from
   `defineModules` is otherwise not detected: its rules never run.
+  `replaceAll` and a restored stack are checked the same way. The asserts see
+  a route in the wrong stack, not rules that never ran, and a release build
+  has none of them: rules are routing gates, not a security boundary.
 
 ### Breaking Changes
 

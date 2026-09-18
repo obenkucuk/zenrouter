@@ -44,6 +44,10 @@ abstract class RouteModule<T extends RouteUri> {
   /// The navigation paths managed by this module.
   ///
   /// Override to provide paths for nested navigation within this module.
+  ///
+  /// In a tree that uses `RouteModuleRedirectRule`, listing a stack here
+  /// claims it for this module, and the claims are read once, on the first
+  /// resolution. Return every stack from the start.
   List<StackPath> get paths => [];
 
   /// Declarative topology exposed by this module.

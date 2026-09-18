@@ -59,6 +59,8 @@ abstract class StackPath<T extends RouteTarget> with ListenableObject {
 
   @protected
   void bindStack(List<T> stack) {
+    // A commit like a push; restoration binds whole stacks through here.
+    assert(stack.every(debugAssertRedirectOwnersGated));
     _stack.clear();
     for (final route in stack) {
       route.isPopByPath = false;

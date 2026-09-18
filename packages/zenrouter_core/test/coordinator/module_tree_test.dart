@@ -640,7 +640,7 @@ void main() {
     });
 
     test(
-      'finds a layout key once: the layout built to answer is discarded once, and later destinations of the key build nothing',
+      'discards a layout built only to answer exactly once, and reuses a mounted layout without discarding it',
       () async {
         final w = wideTree();
         final shells = CountingShellConstructor(
@@ -658,42 +658,30 @@ void main() {
         expect(shells.built.single.stackPath, isNull);
         expect(shells.built.single.discards, 1);
 
-        for (final id in ['x', 'y', 'z']) {
-          expect(
-            tree.landingOf(AppRoute(id, parentLayoutKey: 'aShell')),
-            same(w.a.extra),
-          );
-        }
-        expect(shells.constructions, 1);
-        expect(shells.discards, 1);
-      },
-    );
-
-    test(
-      'finds a layout key through a mounted layout without building or discarding one',
-      () async {
-        final w = wideTree();
-        final shells = CountingShellConstructor(
-          w.app,
-          key: 'aShell',
-          path: w.a.extra,
+        expect(
+          tree.landingOf(AppRoute('x', parentLayoutKey: 'aShell')),
+          same(w.a.extra),
         );
-        // The tree is opted out, so resolving does not look the key up: the
-        // push builds and mounts one shell.
+        expect(shells.built.map((probe) => probe.discards), [1, 1]);
+
+        // The tree is opted out, so resolving does not probe: the push builds
+        // and mounts one shell.
         await w.app.pushSilently(AppRoute('x', parentLayoutKey: 'aShell'));
-        expect(shells.constructions, 1);
-        final mounted = shells.built.single;
+        expect(shells.constructions, 3);
+        final mounted = shells.built.last;
         expect(w.app.root.stack, [same(mounted)]);
 
-        final tree = RouteModuleTree.of(w.app)!;
-        for (final id in ['y', 'z']) {
-          expect(
-            tree.landingOf(AppRoute(id, parentLayoutKey: 'aShell')),
-            same(w.a.extra),
-          );
-        }
-        expect(shells.constructions, 1);
-        expect(mounted.discards, 0);
+        expect(
+          tree.landingOf(AppRoute('y', parentLayoutKey: 'aShell')),
+          same(w.a.extra),
+        );
+        expect(
+          tree.landingOf(AppRoute('z', parentLayoutKey: 'aShell')),
+          same(w.a.extra),
+        );
+        expect(shells.constructions, 3);
+        expect(shells.built.map((layout) => layout.discards), [1, 1, 0]);
+        expect(shells.discards, 2);
         expect(mounted.stackPath, same(w.app.root));
       },
     );
@@ -777,8 +765,10 @@ void main() {
             'which is not part of this tree; create it with a coordinator of '
             'this tree.\n'
             '- RulesWithoutStack declares redirectRules but no stack it or '
-            'its sub-modules list in paths; declare the rules on the module '
-            'that owns the stack its routes land in.';
+            'its sub-modules list in paths, so its routes land on the root '
+            'stack and its rules could gate nothing. Give the module a stack, '
+            'bind a layout to it and give its routes that layout; or declare '
+            'the rules on the root coordinator, which owns the root stack.';
         final throwsMisconfigured = throwsA(
           isA<StateError>().having(
             (error) => error.message,
@@ -975,7 +965,9 @@ void main() {
         const unlisted =
             "AppRoute(x) lands in stack 'loose', which no module of "
             'ScopedModularApp lists in paths; list it in the owning '
-            "module's paths.";
+            "module's paths. Stacks are claimed once, on the first "
+            'resolution: a stack that a paths getter starts to return later '
+            'is not seen, so return it from the start.';
         Matcher throwsMessage(String message) => throwsA(
           isA<StateError>().having(
             (error) => error.message,

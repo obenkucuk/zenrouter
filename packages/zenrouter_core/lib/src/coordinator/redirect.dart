@@ -59,8 +59,10 @@ part of 'base.dart';
 /// owning module, then the destination's own [RouteRedirectRule]. The first
 /// [StopRedirect] or [RedirectTo] wins. A [RedirectTo] target is resolved
 /// again from the top, in its own scope, so a rule must continue for its own
-/// redirect target when that target lands in the same scope. Layout parents
-/// are never offered.
+/// redirect target when that target lands in the same scope. A [RedirectTo]
+/// to the destination itself moves nothing, so it wins nothing: the rules
+/// below it still run, as after a [ContinueRedirect]. Layout parents are
+/// never offered.
 ///
 /// ## Writing rules
 ///
@@ -90,6 +92,17 @@ part of 'base.dart';
 /// `defineModules`, or from a sub-module's, is invisible to the scope, and
 /// its rules never run. Only a call made on such a module coordinator itself
 /// throws. Register every declaring module.
+///
+/// Rules run when a destination is navigated to, and only then. They are
+/// routing gates, not a security boundary:
+/// - State restoration binds every saved stack as it was and runs the rules
+///   for the active route only. A page under it that a rule would refuse now
+///   is one back away. Clear a gated stack yourself when its condition ends
+///   (sign-out), or check again in the page.
+/// - A path-level commit of a route that lands elsewhere (`stack.push` of a
+///   route without this stack's layout) is caught by an assert, so in debug
+///   only.
+/// Keep the checks that protect data on the server.
 mixin RouteModuleRedirectRule<T extends RouteUri> on RouteModule<T> {
   /// Rules for destinations landing in this module's stacks, in order.
   ///
@@ -218,6 +231,10 @@ extension StackPathRedirectDebug on StackPath {
   /// Decided with the owners' rule lists as they are at commit time, after
   /// resolution has awaited its rules; keep `redirectRules` stable between
   /// navigations.
+  ///
+  /// It sees a route in the wrong stack, not rules that never ran: a commit
+  /// that runs no rule at all (`replaceAll`, a restored stack) passes when its
+  /// routes belong in this stack.
   bool debugAssertRedirectOwnersGated(RouteTarget route) {
     if (route is RouteLayoutParent) return true;
     final coordinator = this.coordinator;
@@ -225,10 +242,11 @@ extension StackPathRedirectDebug on StackPath {
     final tree = RouteModuleTree.of(coordinator);
     if (tree == null || !tree.usesRedirectRules) return true;
     tree.validateRedirectScope();
-    final owners = tree
-        .ownerOf(this)
-        ?.ancestry
-        .whereType<RouteModuleRedirectRule>();
+    // The usual case: the route lands in this stack, so both owner chains are
+    // one and nothing can have been skipped.
+    final owner = tree.ownerOf(this);
+    if (identical(owner, tree.ownerOf(tree.landingOf(route)))) return true;
+    final owners = owner?.ancestry.whereType<RouteModuleRedirectRule>();
     if (owners == null || owners.isEmpty) return true;
     final gated =
         tree.ancestryOf(route)?.whereType<RouteModuleRedirectRule>() ??
@@ -264,8 +282,10 @@ String _describe(RouteModuleTreeProblem problem) => switch (problem) {
 
 String _ownsNoStack(RouteModuleTreeNode node) =>
     '${node.module.runtimeType} declares redirectRules but no stack it or '
-    'its sub-modules list in paths; declare the rules on the module that '
-    'owns the stack its routes land in.';
+    'its sub-modules list in paths, so its routes land on the root stack and '
+    'its rules could gate nothing. Give the module a stack, bind a layout to '
+    'it and give its routes that layout; or declare the rules on the root '
+    'coordinator, which owns the root stack.';
 
 String _sharedStack(
   StackPath path,

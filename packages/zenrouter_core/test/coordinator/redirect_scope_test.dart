@@ -29,6 +29,18 @@ class CountingRoute extends AppRoute {
   }
 }
 
+/// A shell that resolves to whatever stack [pick] names when it is asked: a
+/// guest shell and a member shell behind one layout key.
+class SwitchingLayout extends AppLayout {
+  SwitchingLayout(super.id, {required super.layoutKey, required this.pick})
+    : super(path: pick());
+
+  final StackPath Function() pick;
+
+  @override
+  StackPath resolvePath(covariant CoordinatorCore coordinator) => pick();
+}
+
 /// A destination with its own rule chain.
 class RuledAppRoute extends CountingRoute
     with RouteRedirect<AppRoute>, RouteRedirectRule<AppRoute> {
@@ -1519,7 +1531,7 @@ void main() {
     );
 
     test(
-      'C19 an inactive shell is probed once per layout key and discarded; later passes build nothing; a mounted shell is never discarded',
+      'C19 an inactive shell is probed once per pass and discarded; a mounted shell is reused and never discarded',
       () async {
         final log = <String>[];
         late AuthCoordinator auth;
@@ -1540,8 +1552,7 @@ void main() {
         expect(shells.discards, 1);
         expect(shells.built.single.stackPath, isNull);
 
-        // Two more passes that target the inactive shell: the key is known,
-        // so nothing is built.
+        // Two passes that target the inactive shell: two probes.
         final moving = AliasRoute(
           'profile',
           parentLayoutKey: 'authShell',
@@ -1555,14 +1566,15 @@ void main() {
           'app(profile-2)',
           'auth(profile-2)',
         ]);
-        expect(shells.constructions, 1);
-        expect(shells.discards, 1);
+        expect(shells.constructions, 3);
+        expect(shells.discards, 3);
         expect(app.root.stack, isEmpty);
 
-        // A push resolves without building, then builds the shell it mounts.
+        // A push probes once for the resolution, then builds the shell it
+        // mounts.
         await app.pushSilently(profile());
-        expect(shells.constructions, 2);
-        expect(shells.discards, 1);
+        expect(shells.constructions, 5);
+        expect(shells.discards, 4);
         final mounted = shells.built.last;
         expect(mounted.stackPath, same(app.root));
         expect(app.root.stack.single, same(mounted));
@@ -1571,16 +1583,68 @@ void main() {
         await RouteRedirect.resolve(profile(), app);
         expect(app.redirectScopeOf(profile()), [same(app), same(auth)]);
         await app.pushSilently(profile());
-        expect(shells.constructions, 2);
-        expect(shells.discards, 1);
+        expect(shells.constructions, 5);
+        expect(shells.discards, 4);
         expect(mounted.discards, 0);
         expect(stacksOf(app), {
           'root': ['authShell'],
           'nested': <String>[],
           'auth': ['profile', 'profile'],
         });
-        expect(shells.built.first.discards, 1);
-        expect(shells.built.first.stackPath, isNull);
+        expect(
+          shells.built.take(4).map((probe) => probe.discards),
+          everyElement(1),
+        );
+        expect(
+          shells.built.take(4).map((probe) => probe.stackPath),
+          everyElement(isNull),
+        );
+      },
+    );
+
+    test(
+      'C a layout that resolves to another stack later is gated by the owner of the stack it resolves to now',
+      () async {
+        final log = <String>[];
+        late FeatureModule guest;
+        late ScopedFeature member;
+        final app = ScopedModularApp(
+          rules: const [],
+          modules: (c) => [
+            guest = FeatureModule(c, prefix: 'guest', hasPath: true),
+            member = ScopedFeature(
+              c,
+              rules: [RecordingRule('member', log)],
+              prefix: 'member',
+              hasPath: true,
+            ),
+          ],
+        );
+        var signedIn = false;
+        app.defineLayoutParentConstructor(
+          'shell',
+          (key) => SwitchingLayout(
+            'shell',
+            layoutKey: key,
+            pick: () => signedIn ? member.featurePath : guest.featurePath,
+          ),
+        );
+        AppRoute page() => AppRoute('page', parentLayoutKey: 'shell');
+
+        expect(app.redirectScopeOf(page()), [same(app)]);
+        await app.pushSilently(page());
+        expect(log, isEmpty);
+        expect(guest.featurePath.stack.map((route) => route.id), ['page']);
+
+        // Signed in: the same key now resolves to the member's stack. A
+        // landing remembered from before would skip the member's rule.
+        signedIn = true;
+        await app.replace(AppRoute('home'));
+
+        expect(app.redirectScopeOf(page()), [same(app), same(member)]);
+        await app.pushSilently(page());
+        expect(log, contains('member(page)'));
+        expect(member.featurePath.stack.map((route) => route.id), ['page']);
       },
     );
 
@@ -1639,6 +1703,67 @@ void main() {
         expect(fresh.single.discards, 1);
         expect(request.discards, 0);
         expect(stacksOf(f.app), c1Stacks());
+      },
+    );
+
+    test(
+      'C a rule that redirects to the destination itself does not end the pass: every rule below it still runs',
+      () async {
+        final f = Fixture();
+        // A one-word mistake for `continueRedirect()`, and what a rule that
+        // rebuilds its route does whenever nothing needs changing.
+        f.appRule.outcome = (route) => RedirectResult.redirectTo(route);
+        f.secRule.outcome = (_) => const RedirectResult.stop();
+        final request = CountingRoute('keys', parentLayoutKey: 'secShell');
+
+        final resolved = await RouteRedirect.resolve<AppRoute>(request, f.app);
+
+        expect(resolved, isNull, reason: 'the owning module says stop');
+        expect(f.log, ['app(keys)', 'auth(keys)', 'sec(keys)']);
+        expect(request.discards, 1);
+        expect(stacksOf(f.app), c1Stacks());
+      },
+    );
+
+    test(
+      'C an equal new instance from an outer rule is discarded once, and every rule below it still runs',
+      () async {
+        final f = Fixture();
+        final fresh = <CountingRoute>[];
+        f.appRule.outcome = (route) {
+          final echo = CountingRoute(route.id, parentLayoutKey: 'secShell');
+          fresh.add(echo);
+          return RedirectResult.redirectTo(echo);
+        };
+        final request = CountingRoute('keys', parentLayoutKey: 'secShell');
+
+        final resolved = await RouteRedirect.resolve<AppRoute>(request, f.app);
+
+        expect(resolved, same(request));
+        expect(f.log, ['app(keys)', 'auth(keys)', 'sec(keys)']);
+        expect(fresh.single.discards, 1);
+        expect(request.discards, 0);
+      },
+    );
+
+    test(
+      "C the route's own rules still run after every module rule echoes the destination, and an echo costs no hop",
+      () async {
+        final f = Fixture();
+        for (final rule in f.rules) {
+          rule.outcome = (route) => RedirectResult.redirectTo(route);
+        }
+        final own = RecordingRule('own', f.log)
+          ..outcome = (_) => const RedirectResult.stop();
+        final request = RuledAppRoute('keys', [
+          own,
+        ], parentLayoutKey: 'secShell');
+
+        final resolved = await RouteRedirect.resolve<AppRoute>(request, f.app);
+
+        expect(resolved, isNull, reason: 'the route\'s own rule says stop');
+        expect(f.log, ['app(keys)', 'auth(keys)', 'sec(keys)', 'own(keys)']);
+        expect(request.discards, 1);
       },
     );
 
@@ -1909,7 +2034,7 @@ void main() {
 
       final b1 = throwsStateErrorWith([
         'BlogPostsModule declares redirectRules but no stack',
-        'declare the rules on the module that owns the stack',
+        'Give the module a stack, bind a layout to it',
       ]);
       await expectLater(app.pushSilently(route), b1);
       expect(route.events, ['onDiscard']);
@@ -2230,6 +2355,36 @@ void main() {
           'auth(profile)',
         ]);
         expect(stacksOf(f.app), c1Stacks(root: ['profile'], shop: ['cart']));
+      },
+    );
+
+    test(
+      'a layout-less route set into a module stack with replaceAll asserts, like a stray push, and before anything changes',
+      () async {
+        final f = Fixture();
+        await f.auth.extra.pushSilently(profile());
+        f.log.clear();
+
+        expect(
+          () => f.auth.extra.replaceAll([AppRoute('stray')]),
+          throwsA(
+            isA<AssertionError>().having(
+              (e) => '${e.message}',
+              'message',
+              allOf(
+                contains("AppRoute(stray) was committed into stack 'auth'"),
+                contains('AuthCoordinator'),
+              ),
+            ),
+          ),
+        );
+        // replaceAll runs no rule: it is a commit, not a navigation.
+        expect(f.log, isEmpty);
+        expect(stacksOf(f.app), c1Stacks(auth: ['profile']));
+
+        // Routes that belong in the stack pass.
+        f.auth.extra.replaceAll([profile(), profile()]);
+        expect(stacksOf(f.app), c1Stacks(auth: ['profile', 'profile']));
       },
     );
 

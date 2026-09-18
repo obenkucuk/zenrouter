@@ -197,22 +197,19 @@ final class RouteModuleTree {
   /// stack its parent layout resolves to at the tree root, otherwise the root
   /// stack.
   ///
-  /// Kept per layout key: a layout resolves to the stack it is bound on, so
-  /// the first destination of a key finds the stack and later ones read it,
-  /// without walking the active layouts or building a layout. Finding it may
-  /// build a layout, which is discarded afterwards; a mounted layout is
-  /// reused and never discarded. Throws [StateError] when [destination]
-  /// names a layout the tree root cannot build.
+  /// Asked again for every destination, never remembered per layout key: a
+  /// layout may resolve to another stack later (a guest shell and a member
+  /// shell behind one key), and an answer kept from before would gate the
+  /// destination with the wrong module's rules, or with none.
+  ///
+  /// A layout built only to answer this is discarded afterwards; a mounted
+  /// layout is reused and never discarded. Throws [StateError] when
+  /// [destination] names a layout the tree root cannot build.
   StackPath landingOf(RouteTarget destination) {
-    if (destination is! RouteLayoutChild) return root.root;
-    final key = destination.parentLayoutKey;
-    if (key == null) return root.root;
-    return _landings[key] ??= _findLanding(destination);
-  }
-
-  final Map<Object, StackPath> _landings = {};
-
-  StackPath _findLanding(RouteLayoutChild destination) {
+    if (destination is! RouteLayoutChild ||
+        destination.parentLayoutKey == null) {
+      return root.root;
+    }
     final layout = destination.resolveParentLayout(root);
     if (layout == null) throw StateError(_noLayout(destination));
     try {
@@ -264,7 +261,9 @@ final class RouteModuleTree {
   String _unlisted(RouteTarget destination, StackPath landing) =>
       '$destination lands in stack ${_stackLabel(landing)}, which no module of '
       "${root.runtimeType} lists in paths; list it in the owning module's "
-      'paths.';
+      'paths. Stacks are claimed once, on the first resolution: a stack that '
+      'a paths getter starts to return later is not seen, so return it from '
+      'the start.';
 }
 
 /// Who owns each stack of a [RouteModuleTree], and its topology problems.

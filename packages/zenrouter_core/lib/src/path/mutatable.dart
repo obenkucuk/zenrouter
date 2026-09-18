@@ -19,6 +19,8 @@ mixin StackMutatable<T extends RouteTarget> on StackPath<T>
   /// intermediate empty stack while applying a diff.
   void replaceAll(Iterable<T> routes) {
     final nextStack = List<T>.of(routes);
+    // A commit like a push: checked before anything changes.
+    assert(nextStack.every(debugAssertRedirectOwnersGated));
     final retainedRoutes = Set<T>.identity()..addAll(nextStack);
 
     for (final route in _stack) {
