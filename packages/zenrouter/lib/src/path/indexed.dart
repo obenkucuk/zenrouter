@@ -70,7 +70,26 @@ class IndexedStackPath<T extends RouteTarget> extends StackPath<T>
 
   /// Switches the active route to the one at [index].
   ///
-  /// Handles guards on the current route and redirects on the new route.
+  /// Runs the guard of the current entry, then resolves the entry at [index]
+  /// through [RouteRedirect.resolve], like every other entry point: the
+  /// module redirect rules that gate it (see [RouteModuleRedirectRule]), its
+  /// own redirect, the hop budget and cycle detection. A redirect cycle
+  /// between entries throws [StateError] instead of hanging, and so does a
+  /// redirect to a route of the wrong type.
+  ///
+  /// - A cancelled redirect keeps the active index.
+  /// - A redirect to another entry switches to that entry.
+  /// - A redirect out of the entries cancels the switch: a path cannot
+  ///   navigate outside itself. Route such taps through the coordinator
+  ///   (`coordinator.navigate` or `push`) so the redirect can land. In a tree
+  ///   whose module rules gate the entry, this asserts in debug.
+  ///
+  /// Entries are never discarded. A route the redirect created and that is
+  /// not shown is discarded once.
+  ///
+  /// An entry with no redirect of its own and no gating module rules
+  /// switches synchronously, as it always has. Otherwise the switch lands
+  /// once its redirects resolve.
   Future<void> goToIndexed(int index) async {
     if (index >= stack.length || index < 0) {
       throw StateError('Index out of bounds');
@@ -89,25 +108,44 @@ class IndexedStackPath<T extends RouteTarget> extends StackPath<T>
       };
       if (!canPop) return;
     }
-    var newRoute = stack[index];
-    while (newRoute is RouteRedirect) {
-      final routeRedirect = newRoute as RouteRedirect;
-      final redirectTo = await switch (coordinator) {
-        null => routeRedirect.redirect(),
-        final coordinator => routeRedirect.redirectWith(coordinator),
-      };
-      assert(
-        redirectTo == null || redirectTo is T,
-        'Redirected route must be the same type as the stack route',
-      );
-      if (redirectTo == null) return;
-      if (identical(redirectTo, newRoute)) break;
-      newRoute = redirectTo as T;
-    }
+    final requested = stack[index];
+    // Whether module rules gate the entry. A module whose rule list is empty
+    // gates nothing, exactly like a module without the mixin. With no gating
+    // rule and no redirect of its own, the entry resolves to itself
+    // (RouteRedirect.resolve leaves at once), so it switches synchronously,
+    // as it always has.
+    final gated = (coordinator?.redirectScopeOf(requested) ?? const []).any(
+      (module) => module.redirectRules.isNotEmpty,
+    );
+    final resolved = requested is! RouteRedirect && !gated
+        ? requested
+        : await RouteRedirect.resolve<T>(requested, coordinator);
+    // Cancelled: the selection stays, and the live entry is not discarded.
+    if (resolved == null) return;
 
-    final newIndex = stack.indexOf(newRoute);
-    // Not found
-    if (newIndex == -1) return;
+    final newIndex = stack.indexOf(resolved);
+    if (newIndex == -1) {
+      // Redirected out of the entries. The switch is cancelled and the
+      // target is never shown, so discard it unless it is live elsewhere.
+      if (resolved.stackPath == null) resolved.onDiscard();
+      assert(
+        !gated,
+        'Switching to ${requested.runtimeType} was redirected to '
+        '${resolved.runtimeType}, which is not an entry of '
+        "${debugLabel ?? 'this IndexedStackPath'}. The switch was cancelled "
+        'and the redirect was not followed: a path cannot navigate outside '
+        'itself. Route tab taps through coordinator.navigate/push so the '
+        'redirect can land.',
+      );
+      return;
+    }
+    // A fresh route equal to another entry resolves to that entry; the entry
+    // is shown, so the unused fresh route is discarded. (A fresh route equal
+    // to the requested entry never gets here: resolve ends on the entry and
+    // discards the fresh one.)
+    if (!identical(stack[newIndex], resolved) && resolved.stackPath == null) {
+      resolved.onDiscard();
+    }
     _activeIndex = newIndex;
     notifyListeners();
   }
