@@ -466,7 +466,8 @@ Switches to the entry at the specified index.
 
 - A cancelled redirect (`null`, or `RedirectResult.stop()`) keeps the active index.
 - A redirect to another entry switches to that entry. An equal new instance counts as the entry.
-- A redirect out of the entries cancels the switch, because a path cannot navigate outside itself. When module rules gate the entry, this also asserts in debug. Stop, redirect to another entry, or send the tap through `coordinator.navigate` / `push` so the redirect can land.
+- A redirect out of the entries keeps the active index. When module rules gate the entry, the redirect is followed through the coordinator (`coordinator.navigate`), so a session gate can send a tab tap to the sign-in page. When none does, the switch is cancelled: a path cannot navigate outside itself.
+- A gated switch waits for its rules, so switches can overlap. The last one asked for wins, whichever finishes first.
 - Entries are never discarded.
 
 An entry with no redirect of its own and no gating module rules switches synchronously. Otherwise the switch lands once the redirects resolve, so `await` the call before reading `activeIndex`.

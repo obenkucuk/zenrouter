@@ -1061,7 +1061,7 @@ class CheckBalanceRule extends RedirectRule<AppRoute> {
 4. The route's own RouteRedirect / RouteRedirectRule
 ```
 
-The first `StopRedirect` or `RedirectTo` wins. A `RedirectTo` target starts again at the top of its own chain. Layout parents are never offered to module rules.
+The first `StopRedirect` or `RedirectTo` wins. A `RedirectTo` target starts again at the top of its own chain. A module rule that redirects to the destination itself moves nothing, so the rules below it still run. Layout parents are never offered to module rules.
 
 #### RouteModuleRedirectRule vs RouteRedirectRule
 

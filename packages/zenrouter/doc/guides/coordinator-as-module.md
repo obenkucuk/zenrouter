@@ -317,6 +317,12 @@ and nothing after it runs. Outer gates run first so an inner gate can rely
 on them: a session exists before a balance is checked, and a module cannot
 loosen an app-wide gate. The order is fixed.
 
+A module rule that redirects to the destination itself moves nothing, so it
+wins nothing: the rules below it still run, as after `continueRedirect()`.
+An outer rule can never switch an inner gate off by handing the destination
+back, whether by mistake or because it rebuilds the route and nothing
+needed changing.
+
 ### Writing rules
 
 - **Continue for your own redirect target.** A `redirectTo(...)` target is
@@ -364,10 +370,11 @@ loosen an app-wide gate. The order is fixed.
   entry must declare the tab set's layout: an entry without one lands on the
   root stack, so only the root's rules would gate it, and in debug the switch
   asserts, naming the modules it would skip.
-  `RedirectResult.stop()` keeps the current tab. Redirect only to another
-  entry of the same tab set: a path cannot follow a redirect out of itself,
-  so the switch is cancelled, and asserts in debug. Send taps that must leave
-  the tab set through `coordinator.navigate` or `push`.
+  `RedirectResult.stop()` keeps the current tab, and a redirect to another
+  entry switches to it. A redirect out of the tab set keeps the current tab
+  and is followed through the coordinator, so a session gate can send a tab
+  tap to the sign-in page. A gated switch waits for its rules, so two taps
+  can overlap: the last one wins, whichever finishes first.
 
 ### Misconfiguration fails loudly
 
@@ -401,8 +408,11 @@ In debug, an `AssertionError` fires when:
 - a route already on a stack is navigated to again, or a tab entry is
   switched to, and the owners of the stack it sits in would not gate it:
   typically a tab entry without its tab set's layout.
-- `goToIndexed` is redirected out of the tab set while module rules gate the
-  entry.
+
+These asserts are stripped from a release build, and nothing replaces them
+there. Rules run when a destination is navigated to, and only then: they are
+routing gates, not a security boundary. Keep the checks that protect data on
+the server.
 
 Not detected: a module that declares rules but is not returned from
 `defineModules`, or from a sub-module's, is invisible to the scope. Its rules
@@ -545,12 +555,19 @@ and `toUri()` builds each URL back from the same manifest with
 |---|---|---|
 | `pathParameters` | `PostRoute` | `/feed/following/post/12` |
 | `restParameters` | `HelpRoute` | `/help/rules/order` |
-| `queryParameters` | `CatalogTab` and `SignInRoute`, with `RouteQueryParameters` | `/shop/catalog?sort=price`, `/account/sign-in?from=/shop&continue=/account/profile` |
+| `queryParameters` | `CatalogTab`, `SignInRoute` and `OnboardingRoute`, with `RouteQueryParameters` | `/shop/catalog?sort=price`, `/account/sign-in?from=/shop&continue=/account/profile` |
 | `fragment` | `HelpRoute` | `/help/rules/order#stop` |
 
 A query and a fragment are not part of a route's identity. Typing another one
 reaches the page that is already open through `onUpdate`, and the page
 rewrites its URL in place when the user changes it.
+
+The two detour pages, welcome and sign-in, keep both ends of the trip in
+their URL instead of in shared state: `continue` is where the user was going,
+`from` is the page they were on. A rule that sends a user on a detour reads
+the page on screen as the origin, and inherits the origin of a page that is
+itself a detour, so welcome then sign-in still returns to the first page. A
+URL taken from a query is followed only when it stays in the app.
 
 The entry point,
 [`main_coordinator_redirect.dart`](../../example/lib/main_coordinator_redirect.dart),
