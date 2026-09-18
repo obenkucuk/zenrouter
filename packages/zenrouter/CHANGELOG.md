@@ -34,9 +34,13 @@
     them. A route a redirect created and that is not shown is discarded
     once; after a redirect out of the entries it used to be left
     undiscarded.
-  - A redirect out of the entries still cancels the switch. When module rules
-    gate the entry, it also asserts in debug and points to
-    `coordinator.navigate` or `push`, which can land the redirect.
+  - A redirect out of the entries still cancels the switch when no module
+    rule gates the entry. When one does, the redirect is followed through the
+    coordinator (`coordinator.navigate`) and the active index stays, so a
+    session gate can send a tab tap to the sign-in page.
+  - Switches can now overlap, because a gated one waits for its rules. The
+    last one asked for wins, whichever finishes first, and `reset()` cancels
+    one still in flight.
 - **A module rule list must be non-empty to gate a tab switch.** A module
   that mixes in `RouteModuleRedirectRule` with an empty rule list gates
   nothing: its entries switch synchronously, and an entry's own redirect out

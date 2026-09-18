@@ -571,6 +571,18 @@ void main() {
         expect(navigated.discards, 1);
         expect(signIn, same(app.scopedAuth.requireSession.signIns.single));
         expect(app.currentUri, Uri.parse('/account/sign-in'));
+
+        // What that costs a user: rules guard entry, and a pop enters
+        // nothing. One back from the sign-in page shows the restored Profile
+        // to a signed-out user, and no rule runs. An app that must not allow
+        // it clears its gated stacks when the session ends.
+        app.log.clear();
+        expect(await app.tryPop(), isTrue);
+        await tester.pumpAndSettle();
+
+        expect(find.text('profile page'), findsOneWidget);
+        expect(app.log, isEmpty);
+        expect(app.currentUri, Uri.parse('/account/profile'));
       },
     );
   });

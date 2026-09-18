@@ -62,6 +62,9 @@ class IndexedStackPath<T extends RouteTarget> extends StackPath<T>
 
   int _activeIndex = 0;
 
+  /// The number of the latest switch asked for; see [goToIndexed].
+  int _switchGeneration = 0;
+
   /// The index of the currently active path in the stack.
   int get activeIndex => _activeIndex;
 
@@ -79,10 +82,13 @@ class IndexedStackPath<T extends RouteTarget> extends StackPath<T>
   ///
   /// - A cancelled redirect keeps the active index.
   /// - A redirect to another entry switches to that entry.
-  /// - A redirect out of the entries cancels the switch: a path cannot
-  ///   navigate outside itself. Route such taps through the coordinator
-  ///   (`coordinator.navigate` or `push`) so the redirect can land. In a tree
-  ///   whose module rules gate the entry, this asserts in debug.
+  /// - A redirect out of the entries keeps the active index. When module
+  ///   rules gate the entry, the redirect is followed through the coordinator
+  ///   (`coordinator.navigate`), so a session gate can send a tab tap to the
+  ///   sign-in page. When none does, the switch is cancelled, as it always
+  ///   has been: a path cannot navigate outside itself.
+  /// - Switches may overlap, because a gated one waits for its rules. The
+  ///   last one asked for wins, whichever finishes first.
   ///
   /// Entries are never discarded. A route the redirect created and that is
   /// not shown is discarded once.
@@ -94,6 +100,9 @@ class IndexedStackPath<T extends RouteTarget> extends StackPath<T>
     if (index >= stack.length || index < 0) {
       throw StateError('Index out of bounds');
     }
+    // A gated switch waits for its rules, so two may be in flight. Each takes
+    // a number; only the latest may land.
+    final generation = ++_switchGeneration;
 
     /// Ignore already active index
     if (index == _activeIndex) return;
@@ -122,21 +131,28 @@ class IndexedStackPath<T extends RouteTarget> extends StackPath<T>
         : await RouteRedirect.resolve<T>(requested, coordinator);
     // Cancelled: the selection stays, and the live entry is not discarded.
     if (resolved == null) return;
+    // A later switch took over while this one waited: it decides.
+    if (generation != _switchGeneration) {
+      if (resolved.stackPath == null) resolved.onDiscard();
+      return;
+    }
 
     final newIndex = stack.indexOf(resolved);
     if (newIndex == -1) {
-      // Redirected out of the entries. The switch is cancelled and the
-      // target is never shown, so discard it unless it is live elsewhere.
+      // Redirected out of the entries. A path cannot navigate outside itself,
+      // but its coordinator can: when module rules gate the entry, follow the
+      // redirect there, so a gate that sends a tab tap to a sign-in page
+      // works from a bottom bar. The coordinator resolves the target again.
+      if (gated) {
+        if (coordinator case final Navigatable<RouteTarget> navigable) {
+          await navigable.navigate(resolved);
+          return;
+        }
+      }
+      // No module rule gates the entry: the switch is cancelled, as it always
+      // has been, and the target is never shown, so discard it unless it is
+      // live elsewhere.
       if (resolved.stackPath == null) resolved.onDiscard();
-      assert(
-        !gated,
-        'Switching to ${requested.runtimeType} was redirected to '
-        '${resolved.runtimeType}, which is not an entry of '
-        "${debugLabel ?? 'this IndexedStackPath'}. The switch was cancelled "
-        'and the redirect was not followed: a path cannot navigate outside '
-        'itself. Route tab taps through coordinator.navigate/push so the '
-        'redirect can land.',
-      );
       return;
     }
     // A fresh route equal to another entry resolves to that entry; the entry
@@ -173,6 +189,8 @@ class IndexedStackPath<T extends RouteTarget> extends StackPath<T>
 
   @override
   void reset() {
+    // A switch still waiting for its rules must not land after the reset.
+    _switchGeneration++;
     _activeIndex = 0;
     notifyListeners();
   }

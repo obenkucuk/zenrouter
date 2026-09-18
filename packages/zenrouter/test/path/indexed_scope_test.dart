@@ -12,6 +12,8 @@
 // ('Indexed stack should not redirect if redirect rule route return itself',
 // which reads a rule's call count synchronously after an un-awaited switch).
 
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:zenrouter/zenrouter.dart';
@@ -212,16 +214,23 @@ class RecordingRule extends RedirectRule<ScopeRoute> {
   /// Mutable, so a test can change the verdict between navigations.
   RedirectResult<ScopeRoute> Function(ScopeRoute route)? outcome;
 
+  /// When it returns a future, the verdict waits for it: a rule that asks a
+  /// server before it decides.
+  Future<void>? Function(ScopeRoute route)? wait;
+
   final coordinators = <CoordinatorCore>[];
 
   @override
-  RedirectResult<ScopeRoute> redirectResult(
+  FutureOr<RedirectResult<ScopeRoute>> redirectResult(
     CoordinatorCore coordinator,
     ScopeRoute route,
   ) {
     log.add('$name(${route.id})');
     coordinators.add(coordinator);
-    return outcome?.call(route) ?? const RedirectResult.continueRedirect();
+    RedirectResult<ScopeRoute> verdict() =>
+        outcome?.call(route) ?? const RedirectResult.continueRedirect();
+    final pending = wait?.call(route);
+    return pending == null ? verdict() : pending.then((_) => verdict());
   }
 }
 
@@ -598,8 +607,8 @@ void main() {
     });
 
     test(
-      'F1 a redirect out of the entries keeps the index, asserts with the '
-      'coordinator.navigate advice, and discards the fresh target once',
+      'F1 a redirect out of the entries is followed through the coordinator: '
+      'the index stays, the target lands where the coordinator commits it',
       () async {
         final app = TabsApp();
         final [a, b, c] = app.entries;
@@ -607,31 +616,55 @@ void main() {
         app.tabsRule.outcome = (route) =>
             route.id == 'b' ? RedirectResult.redirectTo(outside) : pass();
 
-        await expectLater(
-          app.tabs.goToIndexed(1),
-          throwsA(
-            isA<AssertionError>().having(
-              (error) => '${error.message}',
-              'message',
-              allOf(
-                contains('coordinator.navigate'),
-                contains('TabEntry'),
-                contains('tabs'),
-              ),
-            ),
-          ),
-        );
+        // The textbook gate: a tab tap while the session has expired.
+        await app.tabs.goToIndexed(1);
 
         // outside is layout-less: it lands on the root stack, so only the
-        // root chain runs for it.
-        expect(app.log, ['app(b)', 'tabs(b)', 'app(outside)']);
+        // root chain runs for it; once for the switch, once for the
+        // coordinator navigation that follows the redirect.
+        expect(app.log, ['app(b)', 'tabs(b)', 'app(outside)', 'app(outside)']);
         expect(app.tabs.activeIndex, 0);
         expect(app.tabs.stack, sameEntries([a, b, c]));
-        expect(app.root.stack, isEmpty);
-        expect(outside.discards, 1);
+        expect(app.root.stack, [same(outside)]);
+        expect(outside.discards, 0);
         expect(app.entryDiscards, [0, 0, 0]);
       },
     );
+
+    test('F1 two switches in flight: the last tap wins, whichever rule '
+        'finishes first', () async {
+      final app = TabsApp();
+      final gates = {'b': Completer<void>(), 'c': Completer<void>()};
+      app.tabsRule.wait = (route) => gates[route.id]?.future;
+
+      final toB = app.tabs.goToIndexed(1);
+      final toC = app.tabs.goToIndexed(2);
+      gates['c']!.complete();
+      await toC;
+      expect(app.tabs.activeIndex, 2);
+
+      gates['b']!.complete();
+      await toB;
+      expect(
+        app.tabs.activeIndex,
+        2,
+        reason: 'the earlier tap finished last, and must not win',
+      );
+      expect(app.entryDiscards, [0, 0, 0]);
+    });
+
+    test('F1 a tap on the active tab takes over a switch in flight', () async {
+      final app = TabsApp();
+      final gate = Completer<void>();
+      app.tabsRule.wait = (route) => route.id == 'b' ? gate.future : null;
+
+      final toB = app.tabs.goToIndexed(1);
+      await app.tabs.goToIndexed(0);
+      gate.complete();
+      await toB;
+
+      expect(app.tabs.activeIndex, 0);
+    });
 
     test('F1 coordinator navigation to a tab runs the chain for the operation, '
         'then again for the switch', () async {
