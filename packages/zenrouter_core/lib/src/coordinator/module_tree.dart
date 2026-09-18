@@ -39,7 +39,7 @@ final class RouteModuleTree {
     void visit(RouteModule module, RouteModuleTreeNode? parent) {
       final node = RouteModuleTreeNode._(module, parent, nodes.length);
       nodes.add(node);
-      nodeOf.putIfAbsent(module, () => node);
+      nodeOf[module] ??= node;
       if (module is CoordinatorModular) {
         for (final child in registeredModulesOf(module)) {
           visit(child, node);

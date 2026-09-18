@@ -117,11 +117,8 @@ extension RouteModuleRedirectScope on CoordinatorCore {
   /// ```dart
   /// expect(app.redirectScopeOf(ProfileRoute()), [same(app), same(auth)]);
   /// ```
-  List<RouteModuleRedirectRule> redirectScopeOf(RouteTarget destination) {
-    final tree = moduleTreeUsingRedirectRules;
-    if (tree == null) return const [];
-    return List.unmodifiable(tree.redirectLineageOf(destination));
-  }
+  List<RouteModuleRedirectRule> redirectScopeOf(RouteTarget destination) =>
+      moduleTreeUsingRedirectRules?.redirectLineageOf(destination) ?? const [];
 }
 
 /// Redirect rules on a [RouteModuleTree]: which modules gate a destination,

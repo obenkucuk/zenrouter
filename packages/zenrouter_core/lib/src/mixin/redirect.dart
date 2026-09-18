@@ -53,114 +53,87 @@ mixin RouteRedirect<T extends RouteTarget> on RouteTarget {
     T route,
     CoordinatorCore? coordinator,
   ) async {
+    T target = route;
+    // The targets the chain moved away from, in order: adding one again is a
+    // cycle, and their count is the hop count. A chain may come back to one
+    // of them (gated → splash → gated), so they are discarded only once the
+    // chain ends, and never the route it returns.
+    final movedFrom = <RouteTarget>{};
+    RouteTarget? returned;
     Set<RouteTarget>? discarded;
     void discard(RouteTarget abandoned) {
-      // Never discard a live stack member: a tab entry, or a re-navigated or
-      // restored route, would have its result completed while on screen.
+      // Never a live stack member: a tab entry, or a re-navigated or restored
+      // route, would have its result completed while on screen. At most once
+      // each: a cycle names a route twice.
       if (abandoned.stackPath != null) return;
-      if (!(discarded ??= Set<RouteTarget>.identity()).add(abandoned)) return;
-      abandoned.onDiscard();
+      if ((discarded ??= Set.identity()).add(abandoned)) abandoned.onDiscard();
     }
 
-    final RouteModuleTree? tree;
     try {
-      tree = coordinator?.moduleTreeUsingRedirectRules;
-    } catch (_) {
-      discard(route);
-      rethrow;
-    }
+      final tree = coordinator?.moduleTreeUsingRedirectRules;
+      // No await before the first rule or redirectWith call: callers may read
+      // a rule's effects synchronously after starting a navigation.
+      while (true) {
+        final lineage =
+            tree?.redirectLineageOf(target) ??
+            const <RouteModuleRedirectRule>[];
+        if (target is! RouteRedirect && lineage.isEmpty) break;
 
-    T target = route;
-    final seen = <RouteTarget>{};
-    var hops = 0;
-    // The targets the chain moved away from. They are discarded only once
-    // the chain ends, and never the route it returns: a chain may come back
-    // to one of them (gated → splash → gated).
-    final movedFrom = <RouteTarget>[];
-    void discardMovedFrom({RouteTarget? except}) {
+        final next = await _redirectOnce(
+          target,
+          coordinator,
+          tree?.root,
+          lineage,
+        );
+        if (next == null) return null;
+        if (next == target) {
+          // An equal new instance ends the chain on the current target. It
+          // is never shown, so it is discarded.
+          if (!identical(next, target)) discard(next);
+          break;
+        }
+        if (next is! T) {
+          discard(next);
+          throw StateError(
+            'RouteRedirect returned ${next.runtimeType}, expected $T. '
+            'Redirect destinations must be the same route type as the source.',
+          );
+        }
+        if (movedFrom.length >= maxRedirectHops || !movedFrom.add(target)) {
+          discard(next);
+          throw StateError(
+            'RouteRedirect loop detected after ${movedFrom.length} hops '
+            'starting from $route',
+          );
+        }
+        target = next;
+      }
+      returned = target;
+      return target;
+    } finally {
+      // However the chain ended (a result, a cancel, or an error from a
+      // rule, a redirect or the scope lookup), discard what it abandoned.
       for (final abandoned in movedFrom) {
-        if (!identical(abandoned, except)) discard(abandoned);
+        if (!identical(abandoned, returned)) discard(abandoned);
       }
+      if (!identical(target, returned)) discard(target);
     }
-
-    // No await before the first rule or redirectWith call: callers may read
-    // a rule's effects synchronously after starting a navigation.
-    while (true) {
-      final List<RouteModuleRedirectRule> lineage;
-      try {
-        lineage = tree?.redirectLineageOf(target) ?? const [];
-      } catch (_) {
-        discardMovedFrom();
-        discard(target);
-        rethrow;
-      }
-      if (target is! RouteRedirect && lineage.isEmpty) break;
-
-      final RouteTarget? next;
-      try {
-        next = await _redirectOnce(target, coordinator, tree, lineage);
-      } catch (_) {
-        // A throwing rule or redirect abandons the chain: discard what it
-        // leaves behind, then let the error through.
-        discardMovedFrom();
-        discard(target);
-        rethrow;
-      }
-      if (next == null) {
-        discardMovedFrom();
-        discard(target);
-        return null;
-      }
-
-      if (next == target) {
-        // An equal new instance ends the chain on the current target. It is
-        // never shown, so it is discarded.
-        if (!identical(next, target)) discard(next);
-        break;
-      }
-
-      if (next is! T) {
-        discardMovedFrom();
-        discard(target);
-        discard(next);
-        throw StateError(
-          'RouteRedirect returned ${next.runtimeType}, expected $T. '
-          'Redirect destinations must be the same route type as the source.',
-        );
-      }
-
-      if (!seen.add(target) || hops >= maxRedirectHops) {
-        discardMovedFrom();
-        discard(target);
-        discard(next);
-        throw StateError(
-          'RouteRedirect loop detected after $hops hops starting from $route',
-        );
-      }
-      hops += 1;
-
-      movedFrom.add(target);
-      target = next;
-    }
-    discardMovedFrom(except: target);
-    return target;
   }
 
   /// Runs one pass for [target]: the gating module rules in [lineage] first,
   /// then the target's own redirect when every module rule continues.
   ///
-  /// Module rules receive the tree root; the route's own redirect receives
+  /// Module rules receive the tree [root]; the route's own redirect receives
   /// the call-site [coordinator], as it always has.
   static Future<RouteTarget?> _redirectOnce(
     RouteTarget target,
     CoordinatorCore? coordinator,
-    RouteModuleTree? tree,
+    CoordinatorCore? root,
     List<RouteModuleRedirectRule> lineage,
   ) async {
     for (final module in lineage) {
       for (final rule in module.redirectRules) {
-        final result = await rule.redirectResult(tree!.root, target);
-        switch (result) {
+        switch (await rule.redirectResult(root!, target)) {
           case StopRedirect():
             return null;
           case ContinueRedirect():
