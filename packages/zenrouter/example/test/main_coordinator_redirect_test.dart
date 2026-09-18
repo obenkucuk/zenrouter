@@ -877,8 +877,9 @@ void main() {
     void noteMounted() =>
         mounted.addAll([for (final route in c.root.stack) '$route']);
 
+    // The session comes from the sign-in page below, not from its flag: a
+    // signed-in user is sent away from that page, and this walk visits it.
     await tapKey(tester, 'flag-subscribed');
-    await tapKey(tester, 'flag-signed-in');
     await tapKey(tester, 'flag-two-factor');
 
     await tapKey(tester, 'hub-shop-home');
@@ -1698,6 +1699,279 @@ void main() {
       stacksWith({
         'root': ['FeedLayout'],
         'feed-for-you': ['FeedListRoute[for-you]'],
+      }),
+    );
+  });
+
+  // ===========================================================================
+  // The browser walk of 2026-09-19: what a user sees around a Stop, the
+  // sign-in continuation, and a cold start on a URL a rule stops.
+  // ===========================================================================
+
+  /// The notice the host shows when a rule stops a navigation.
+  Finder stopNotice(String decision) => find.descendant(
+    of: find.byKey(const Key('stop-notice')),
+    matching: find.textContaining(decision),
+  );
+
+  /// No shell sits on the root stack with nothing in it: that is a blank
+  /// page with a back arrow.
+  void expectNoEmptyShell() {
+    for (final route in c.root.stack) {
+      if (route is RouteLayout) {
+        expect(
+          route.resolvePath(c).stack,
+          isNotEmpty,
+          reason: '${labelOf(route)} is on the root stack with an empty stack',
+        );
+      }
+    }
+  }
+
+  testWidgets('walk: a rule that stops a navigation says so on screen, from '
+      'the hub and on a tab tap', (tester) async {
+    c.authSession.signedIn.value = true;
+    await pumpApp(tester);
+
+    await tapKey(tester, 'hub-security');
+
+    expect(find.text('Scoped redirect rules'), findsOneWidget);
+    expect(
+      stopNotice('RequireTwoFactor(SecuritySettingsRoute) → stop (2FA is off)'),
+      findsOneWidget,
+    );
+
+    await tapKey(tester, 'hub-billing');
+
+    expect(
+      stopNotice('SubscriptionGate(BillingTab) → stop (no subscription)'),
+      findsOneWidget,
+    );
+
+    await tapKey(tester, 'hub-shop-home');
+    await tap(tester, navBar('Billing'));
+
+    expect(find.text('Shop home'), findsOneWidget);
+    expect(
+      stopNotice('SubscriptionGate(BillingTab) → stop (no subscription)'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('walk: signing in leaves the sign-in page even when a deeper '
+      'rule stops where the user was going', (tester) async {
+    await pumpApp(tester);
+
+    await tapKey(tester, 'hub-security');
+    expect(
+      find.text(
+        'RequireSession sent you here: /account/security needs a session.',
+      ),
+      findsOneWidget,
+    );
+
+    await tapKey(tester, 'auth-sign-in');
+
+    // Signed in, but Security needs 2FA: the user is on the profile, and the
+    // stop is on screen.
+    expect(find.text('Your profile'), findsOneWidget);
+    expect(find.text('Sign in'), findsNothing);
+    expect(
+      stopNotice('RequireTwoFactor(SecuritySettingsRoute) → stop (2FA is off)'),
+      findsOneWidget,
+    );
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'AuthLayout'],
+        'auth': ['ProfileRoute'],
+      }),
+    );
+  });
+
+  testWidgets('walk: signing in with 2FA on opens Security over the profile, '
+      'and no back ever shows an empty shell', (tester) async {
+    c.twoFactor.enabled.value = true;
+    await pumpApp(tester);
+
+    await tapKey(tester, 'hub-security');
+    await tapKey(tester, 'auth-sign-in');
+
+    expect(find.text('Security settings'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'AuthLayout', 'SecurityLayout'],
+        'auth': ['ProfileRoute'],
+        'security': ['SecuritySettingsRoute'],
+      }),
+    );
+    expectNoEmptyShell();
+
+    await back(tester);
+
+    expect(find.text('Your profile'), findsOneWidget);
+    expectNoEmptyShell();
+
+    await back(tester);
+
+    expect(find.text('Scoped redirect rules'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute'],
+      }),
+    );
+  });
+
+  testWidgets('walk: a sign-in page opened directly never shows an attempt '
+      'the user walked away from', (tester) async {
+    await pumpApp(tester);
+
+    await tapKey(tester, 'hub-security');
+    await back(tester);
+    await tapKey(tester, 'hub-sign-in');
+
+    expect(find.text('You opened this page yourself.'), findsOneWidget);
+    expect(find.textContaining('sent you here'), findsNothing);
+  });
+
+  testWidgets('walk: a cold start on a URL a rule stops opens the hub, not a '
+      'blank app', (tester) async {
+    c = AppCoordinator(initialRoutePath: Uri.parse('/shop/billing'));
+    await pumpApp(tester);
+
+    expect(find.text('Scoped redirect rules'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute'],
+      }),
+    );
+    expect(
+      stopNotice('SubscriptionGate(BillingTab) → stop (no subscription)'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('walk: entering and leaving Security three times leaves every '
+      'stack as it was', (tester) async {
+    c.authSession.signedIn.value = true;
+    c.twoFactor.enabled.value = true;
+    await pumpApp(tester);
+
+    for (var round = 1; round <= 3; round++) {
+      await tapKey(tester, 'hub-security');
+      expect(find.text('Security settings'), findsOneWidget, reason: '$round');
+      await back(tester);
+      expect(
+        stacks(),
+        stacksWith({
+          'root': ['HubRoute'],
+        }),
+        reason: '$round',
+      );
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // The address-bar walk of 2026-09-19: every navigation typed as a URL into
+  // a running app.
+  // ---------------------------------------------------------------------------
+
+  /// Types [location] into the address bar of the running app.
+  Future<void> typeUrl(WidgetTester tester, String location) async {
+    unawaited(c.routerDelegate.setNewRoutePath(Uri.parse(location)));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('walk: with a sign-in page open, the latest gated URL typed is '
+      'where signing in continues', (tester) async {
+    await pumpApp(tester);
+
+    await typeUrl(tester, '/account/security');
+    expect(
+      find.text(
+        'RequireSession sent you here: /account/security needs a session.',
+      ),
+      findsOneWidget,
+    );
+
+    // The same sign-in page stays; it now carries the new attempt.
+    await typeUrl(tester, '/account/profile');
+    expect(
+      find.text(
+        'RequireSession sent you here: /account/profile needs a session.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('/account/security'), findsNothing);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'AuthLayout'],
+        'auth': ['SignInRoute'],
+      }),
+    );
+
+    await tapKey(tester, 'auth-sign-in');
+
+    expect(find.text('Your profile'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'AuthLayout'],
+        'auth': ['ProfileRoute'],
+      }),
+    );
+  });
+
+  testWidgets('walk: typing the sign-in URL over an open sign-in page drops '
+      'its attempt', (tester) async {
+    await pumpApp(tester);
+
+    await typeUrl(tester, '/account/security');
+    await typeUrl(tester, '/account/sign-in');
+
+    expect(find.text('You opened this page yourself.'), findsOneWidget);
+  });
+
+  testWidgets('walk: a signed-in user who asks for the sign-in page gets their '
+      'profile, from the address bar and from the hub', (tester) async {
+    c.authSession.signedIn.value = true;
+    await pumpApp(tester);
+
+    await typeUrl(tester, '/account/sign-in');
+
+    expect(find.text('Your profile'), findsOneWidget);
+    expect(
+      trace().last,
+      anyOf(
+        pass('RequireSession', 'ProfileRoute'),
+        contains('RequireSession(ProfileRoute)'),
+      ),
+    );
+    expect(
+      saw('RequireSession'),
+      containsAllInOrder(['SignInRoute', 'ProfileRoute']),
+    );
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'AuthLayout'],
+        'auth': ['ProfileRoute'],
+      }),
+    );
+
+    await back(tester);
+    await tapKey(tester, 'hub-sign-in');
+
+    expect(find.text('Your profile'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'AuthLayout'],
+        'auth': ['ProfileRoute'],
       }),
     );
   });

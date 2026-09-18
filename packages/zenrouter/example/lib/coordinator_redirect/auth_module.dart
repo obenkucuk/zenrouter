@@ -27,14 +27,7 @@ import 'package:zenrouter/zenrouter.dart';
 class AuthSession {
   final signedIn = ValueNotifier<bool>(false);
 
-  /// The destination RequireSession sent to sign-in, so signing in can
-  /// continue there.
-  final lastAttempt = ValueNotifier<Uri?>(null);
-
-  void reset() {
-    signedIn.value = false;
-    lastAttempt.value = null;
-  }
+  void reset() => signedIn.value = false;
 }
 
 class AuthRouteModuleCoordinator extends Coordinator<RouteUnique>
@@ -97,7 +90,7 @@ AuthRouteModuleCoordinator _authOf(CoordinatorCore coordinator) =>
     (coordinator as CoordinatorModular<RouteUnique>)
         .getModule<AuthRouteModuleCoordinator>();
 
-/// Sends a signed-out user to sign-in.
+/// Sends a signed-out user to sign-in, and a signed-in user away from it.
 ///
 /// Typed to [RouteUnique], not [AuthRoute]: it also gates what lands in the
 /// sub-modules' stacks, and their routes have their own base.
@@ -120,14 +113,22 @@ class RequireSession extends RedirectRule<RouteUnique> {
     // also names a sub-module's route, whose type this file cannot see.
     final name = '$route';
     // SignInRoute is this rule's own redirect target and lands in the same
-    // stack, so the rule continues for it.
+    // stack, so the rule continues for it while there is no session. A
+    // signed-in user has no business on it: they get their profile, whether
+    // they typed the URL, went back to it, or tapped a link.
+    if (route is SignInRoute && session.signedIn.value) {
+      trace('$label($name) → ProfileRoute (already signed in)');
+      return RedirectResult.redirectTo(ProfileRoute());
+    }
     if (route is SignInRoute || session.signedIn.value) {
       trace('$label($name) → continue');
       return const RedirectResult.continueRedirect();
     }
-    session.lastAttempt.value = route.toUri();
     trace('$label($name) → SignInRoute (no session)');
-    return RedirectResult.redirectTo(SignInRoute());
+    // The sign-in page carries where the user was going, so signing in can
+    // continue there. It is this page's own, not shared state: a sign-in page
+    // opened directly has none, whatever was attempted before.
+    return RedirectResult.redirectTo(SignInRoute(attempt: route.toUri()));
   }
 }
 
@@ -182,6 +183,23 @@ class AuthLayout extends AuthRoute with RouteLayout<RouteUnique> {
 }
 
 class SignInRoute extends AuthRoute {
+  SignInRoute({Uri? attempt}) : attempt = ValueNotifier(attempt);
+
+  /// Where the user was going when RequireSession sent them here, or null
+  /// when they opened this page themselves. Not part of the route's identity:
+  /// it is the same page either way.
+  final ValueNotifier<Uri?> attempt;
+
+  /// Navigating to a sign-in page while one is open keeps the open one, and
+  /// hands it the new one here. The latest attempt wins: a user who types a
+  /// second gated URL continues there, and one who opens sign-in directly has
+  /// no attempt left.
+  @override
+  void onUpdate(covariant SignInRoute newRoute) {
+    super.onUpdate(newRoute);
+    attempt.value = newRoute.attempt.value;
+  }
+
   @override
   String get label => 'SignInRoute';
 
@@ -195,7 +213,7 @@ class SignInRoute extends AuthRoute {
       heading: 'Sign in',
       children: [
         ValueListenableBuilder<Uri?>(
-          valueListenable: session.lastAttempt,
+          valueListenable: attempt,
           builder: (context, attempt, _) => Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             child: Text(
@@ -211,12 +229,17 @@ class SignInRoute extends AuthRoute {
             key: const Key('auth-sign-in'),
             onPressed: () {
               session.signedIn.value = true;
-              final next =
-                  session.lastAttempt.value ?? Uri.parse('/account/profile');
-              session.lastAttempt.value = null;
-              // Replaces this page with where the user was going. By URI:
-              // the destination may belong to a module this file cannot see.
-              coordinator.pushReplacementUri(next);
+              // The profile replaces this page, inside this shell. Then the
+              // user goes on to where they were going, by URI: it may belong
+              // to a module this file cannot see. A rule deeper in the tree
+              // may still stop that (Security needs 2FA); the user is then
+              // on their profile, signed in, not on a sign-in page that did
+              // nothing. Navigations run in the order they were started.
+              final attempt = this.attempt.value;
+              coordinator.pushReplacement(ProfileRoute());
+              if (attempt != null && attempt != ProfileRoute().toUri()) {
+                coordinator.pushUri(attempt);
+              }
             },
             child: const Text('Sign in and continue'),
           ),

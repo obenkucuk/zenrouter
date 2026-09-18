@@ -37,6 +37,18 @@
 //                                              > RequireTwoFactor
 //   every layout (shells and branch roots)     none
 //
+// Three shapes carry the same mixin, on purpose. The root is a coordinator.
+// The auth module is a coordinator used as a module: the shape whose pointers
+// are erased one hop up, and the only one that can register sub-modules, which
+// the two-levels-deep case needs. The rest are plain RouteModules.
+//
+// zenrouter_devtools lists coordinators, and groups each path under
+// StackPath.coordinator, which goes one hop up. So it shows two coordinators,
+// and lists `security` under AppCoordinator, not under the auth coordinator
+// that registers SecurityModule. The path inspector at the bottom of the
+// screen reads the defineModules registry instead, so it shows the real owner
+// chain: AppCoordinator › AuthRouteModuleCoordinator › SecurityModule.
+//
 // The chain depends only on where a destination lands, never on the call
 // site: a hub button, a tab tap, a branch switch, a link from another module,
 // a deep link and a path-level push all get the same chain. Open the rule
@@ -111,6 +123,12 @@ class HostState {
   /// Where the user was going when [OnboardingGate] sent them to onboarding.
   Uri? resumeAfterOnboarding;
 
+  /// How a trace line spells a stop: `Rule(Route) → stop (why)`.
+  ///
+  /// A stopped navigation changes nothing on screen, so the dock reads this
+  /// to say so. Without it, a tap that a rule stops looks like a dead button.
+  static const stopVerdict = '→ stop';
+
   /// The trace every rule writes to: a plain `void Function(String)`.
   void log(String line) => trace.value = [...trace.value, line];
 
@@ -137,6 +155,7 @@ class AppCoordinator extends Coordinator<RouteUnique>
         RouteModuleRedirectRule<RouteUnique>,
         CoordinatorDebug<RouteUnique> {
   AppCoordinator({
+    super.initialRoutePath,
     HostState? host,
     ShopAccount? shopAccount,
     AuthSession? authSession,
@@ -196,6 +215,15 @@ class AppCoordinator extends Coordinator<RouteUnique>
 
   @override
   RouteUnique notFoundRoute(Uri uri) => NotFoundRoute(uri);
+
+  /// A rule may stop the URL the app is opened with, and a stopped
+  /// navigation shows nothing: on a cold start that is a blank app. The host
+  /// never leaves the root stack empty; it opens the hub instead.
+  @override
+  Future<void> navigate(RouteUnique route) async {
+    await super.navigate(route);
+    if (root.stack.isEmpty) await replace(HubRoute());
+  }
 
   /// Every path of the app, with the module that owns it.
   ///
@@ -421,7 +449,9 @@ class HubPage extends StatelessWidget {
           _Link(
             id: 'sign-in',
             title: 'Sign in',
-            subtitle: 'SignInRoute · RequireSession lets it through',
+            subtitle:
+                'SignInRoute · RequireSession lets a guest through, and sends '
+                'a signed-in user to the profile',
             onTap: () => c.push(SignInRoute()),
           ),
           _Link(
@@ -622,6 +652,38 @@ class _RedirectDockState extends State<RedirectDock> {
   bool _pathsOpen = false;
 
   @override
+  void initState() {
+    super.initState();
+    widget.coordinator.host.trace.addListener(_noticeStop);
+  }
+
+  @override
+  void dispose() {
+    widget.coordinator.host.trace.removeListener(_noticeStop);
+    _stoppedTimer?.cancel();
+    super.dispose();
+  }
+
+  /// The decision that last stopped a navigation, shown for a few seconds.
+  String? _stopped;
+  Timer? _stoppedTimer;
+
+  /// A stop leaves the screen as it was, so it is the one decision the user
+  /// cannot see. The dock says it: it sits under every page, covers none of
+  /// their controls, and is there even when a rule stops the very first
+  /// navigation and no page is up yet.
+  void _noticeStop() {
+    final trace = widget.coordinator.host.trace.value;
+    if (!mounted || trace.isEmpty) return;
+    if (!trace.last.contains(HostState.stopVerdict)) return;
+    _stoppedTimer?.cancel();
+    _stoppedTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) setState(() => _stopped = null);
+    });
+    setState(() => _stopped = trace.last);
+  }
+
+  @override
   Widget build(BuildContext context) {
     final coordinator = widget.coordinator;
     return Column(
@@ -643,6 +705,7 @@ class _RedirectDockState extends State<RedirectDock> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                if (_stopped case final decision?) _StopNotice(decision),
                 ValueListenableBuilder<List<String>>(
                   valueListenable: coordinator.host.trace,
                   builder: (context, trace, _) => _DockHeader(
@@ -675,6 +738,34 @@ class _RedirectDockState extends State<RedirectDock> {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _StopNotice extends StatelessWidget {
+  const _StopNotice(this.decision);
+
+  final String decision;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      key: const Key('stop-notice'),
+      color: scheme.errorContainer,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        children: [
+          Icon(Icons.block, size: 18, color: scheme.onErrorContainer),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'A rule stopped this navigation, so nothing changed · $decision',
+              style: TextStyle(color: scheme.onErrorContainer),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
