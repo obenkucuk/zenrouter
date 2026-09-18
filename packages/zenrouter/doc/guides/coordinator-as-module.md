@@ -532,10 +532,31 @@ flutter run -t lib/main_coordinator_redirect.dart
 | [`auth_module.dart`](../../example/lib/coordinator_redirect/auth_module.dart) | `AuthRouteModuleCoordinator`, a coordinator used as a module | `RequireSession` | `NavigationPath` |
 | [`security_module.dart`](../../example/lib/coordinator_redirect/security_module.dart) | `SecurityModule`, registered by the host under the auth coordinator | `RequireTwoFactor` | `NavigationPath`, two levels deep |
 
+Every module owns its routing as a `RouteManifest`, with `RouteModuleBinding`
+on the plain modules. The root and the auth coordinator group sub-modules, so
+they cannot mix it in; they give their own graph to the composed one through
+`localRouteManifestFragment` and resolve their own URLs through their
+bindings. The shells are one layout kind each: `indexed` for the shop tabs,
+`branched` for the feed, `stack` for the rest. No file parses a URL by hand,
+and `toUri()` builds each URL back from the same manifest with
+`location(...)`, using every part of it:
+
+| Part | Route | URL |
+|---|---|---|
+| `pathParameters` | `PostRoute` | `/feed/following/post/12` |
+| `restParameters` | `HelpRoute` | `/help/rules/order` |
+| `queryParameters` | `CatalogTab` and `SignInRoute`, with `RouteQueryParameters` | `/shop/catalog?sort=price`, `/account/sign-in?from=/shop&continue=/account/profile` |
+| `fragment` | `HelpRoute` | `/help/rules/order#stop` |
+
+A query and a fragment are not part of a route's identity. Typing another one
+reaches the page that is already open through `onUpdate`, and the page
+rewrites its URL in place when the user changes it.
+
 The entry point,
 [`main_coordinator_redirect.dart`](../../example/lib/main_coordinator_redirect.dart),
 only composes the tree. The dock at the bottom of the screen shows every
 rule decision, and for each path its type, owner, chain and stack.
+zenrouter_devtools draws the composed manifest in its Graph tab.
 
 ## See also
 
