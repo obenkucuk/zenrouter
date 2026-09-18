@@ -338,6 +338,13 @@ loosen an app-wide gate. The order is fixed.
   lists as they are at commit time, so keep `redirectRules` stable between
   navigations: change what a rule decides through its state, not by
   swapping the list.
+- **A stop shows nothing, so say why.** `RedirectResult.stop()` cancels the
+  navigation and leaves the screen as it was, which to a user is a dead
+  button. Tell them: the example's host shows a notice for every stop. When
+  the app is opened on a URL and a rule stops it, no page is up yet and the
+  app is blank. Redirect instead of stopping for a URL users can land on, or
+  give the host a fallback: the example overrides `navigate` and opens its
+  hub when the root stack is still empty.
 - **Rules guard entry, not presence.** `pop`, `tryPop`, system back,
   `remove`, `reset` and `replaceAll` run no rule, and a page that is open
   stays open when a rule's state changes. Browser back re-enters a URL, so
