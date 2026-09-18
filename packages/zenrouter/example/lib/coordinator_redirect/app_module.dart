@@ -121,9 +121,6 @@ class HostState {
   /// Every rule decision, oldest first, as `Rule(Route) → verdict`.
   final trace = ValueNotifier<List<String>>(const []);
 
-  /// Where the user was going when [OnboardingGate] sent them to onboarding.
-  Uri? resumeAfterOnboarding;
-
   /// How a trace line spells a stop: `Rule(Route) → stop (why)`.
   ///
   /// A stopped navigation changes nothing on screen, so the dock reads this
@@ -137,7 +134,6 @@ class HostState {
 
   void reset() {
     onboarded.value = true;
-    resumeAfterOnboarding = null;
     clearTrace();
   }
 }
@@ -228,7 +224,7 @@ class AppCoordinator extends Coordinator<RouteUnique>
       RouteBinding(id: HostRouteId.hub, create: (_) => HubRoute()),
       RouteBinding(
         id: HostRouteId.onboarding,
-        create: (_) => OnboardingRoute(),
+        create: (match) => OnboardingRoute(queries: match.uri.queryParameters),
       ),
       RouteBinding(
         id: HostRouteId.help,
@@ -301,6 +297,39 @@ class AppCoordinator extends Coordinator<RouteUnique>
   }
 }
 
+/// A URL taken from a query, followed only when it stays in this app: no
+/// scheme, no host, an absolute path. Anything else, such as another site or
+/// an empty value, is dropped: a sign-in or welcome link must not be able to
+/// send the user somewhere its author chose.
+///
+/// Each module file keeps its own copy: modules share no file.
+Uri? _localUri(String? value) {
+  if (value == null || !value.startsWith('/') || value.startsWith('//')) {
+    return null;
+  }
+  final uri = Uri.tryParse(value);
+  return uri == null || uri.hasScheme || uri.hasAuthority ? null : uri;
+}
+
+/// Where the user comes from when a rule sends them on a detour: the page on
+/// screen. On a cold start there is none.
+///
+/// A page that is itself a detour, one that carries `from` or `continue`, is
+/// not where the user came from, and it is gone once the detour ends. Its own
+/// origin is inherited instead, so a chain of detours (welcome, then sign-in)
+/// keeps the first one. The two query names are the only thing the detour
+/// pages of different modules share.
+Uri? _originOf(CoordinatorCore coordinator) {
+  final onScreen = coordinator.activePath.activeRoute;
+  if (onScreen == null) return null;
+  if (onScreen case RouteQueryParameters(
+    :final queries,
+  ) when queries.containsKey('from') || queries.containsKey('continue')) {
+    return _localUri(queries['from']);
+  }
+  return coordinator.currentUri;
+}
+
 /// The root rule: sends everything to onboarding until it is finished.
 class OnboardingGate extends RedirectRule<RouteUnique> {
   OnboardingGate(this.host);
@@ -324,9 +353,12 @@ class OnboardingGate extends RedirectRule<RouteUnique> {
       host.log('$label($name) → continue');
       return const RedirectResult.continueRedirect();
     }
-    host.resumeAfterOnboarding = route.toUri();
     host.log('$label($name) → OnboardingRoute (not onboarded)');
-    return RedirectResult.redirectTo(OnboardingRoute());
+    // The welcome URL carries both ends of the trip in its query, as the
+    // sign-in URL does: where the user was going, and where they came from.
+    return RedirectResult.redirectTo(
+      OnboardingRoute.after(route.toUri(), from: _originOf(coordinator)),
+    );
   }
 }
 
@@ -359,16 +391,47 @@ class HubRoute extends HostRoute {
       HubPage(coordinator: coordinator);
 }
 
-class OnboardingRoute extends HostRoute {
+/// The welcome page keeps both ends of the trip in its URL query, like the
+/// sign-in page: `/welcome?from=/&continue=/feed/for-you`.
+///
+/// [RouteQueryParameters] keeps the query out of the route's identity and
+/// hands a newer one to the open page through `onUpdate`. Nothing is kept in
+/// shared state, so an attempt the user walked away from leaves nothing
+/// behind: `/welcome` opened directly has no attempt.
+class OnboardingRoute extends HostRoute with RouteQueryParameters {
+  OnboardingRoute({Map<String, String> queries = const {}})
+    : queryNotifier = ValueNotifier(queries);
+
+  /// The welcome page [OnboardingGate] sends a user to on their way to
+  /// [attempt], from the page at [from].
+  OnboardingRoute.after(Uri attempt, {Uri? from})
+    : this(
+        queries: {
+          if (from != null) originQuery: '$from',
+          attemptQuery: '$attempt',
+        },
+      );
+
+  /// The queries of a detour page, the same in every module: where the user
+  /// was going, and the page they were on.
+  static const attemptQuery = 'continue';
+  static const originQuery = 'from';
+
+  @override
+  final ValueNotifier<Map<String, String>> queryNotifier;
+
   @override
   String get label => 'OnboardingRoute';
 
   @override
-  Uri toUri() => AppCoordinator.manifest.location(HostRouteId.onboarding);
+  Uri toUri() => AppCoordinator.manifest.location(
+    HostRouteId.onboarding,
+    queryParameters: queries,
+  );
 
   @override
   Widget build(covariant AppCoordinator coordinator, BuildContext context) =>
-      OnboardingPage(coordinator: coordinator);
+      OnboardingPage(route: this, coordinator: coordinator);
 }
 
 /// A help page. It has no layout, so it lands on the root stack and only the
@@ -409,6 +472,12 @@ class HelpRoute extends HostRoute {
   void onUpdate(covariant HelpRoute newRoute) {
     super.onUpdate(newRoute);
     section.value = newRoute.section.value;
+  }
+
+  @override
+  void onDiscard() {
+    super.onDiscard();
+    section.dispose();
   }
 
   @override
@@ -622,6 +691,8 @@ class HelpPage extends StatelessWidget {
             'OnboardingGate gates it. The topic is a rest parameter, and the '
             'section is the URL fragment.',
           ),
+          if (section != null && sections.every((s) => s.$1 != section))
+            _Blurb('The fragment #$section names no section.'),
           for (final (slug, title, text) in sections)
             ListTile(
               key: Key(
@@ -649,42 +720,55 @@ class HelpPage extends StatelessWidget {
 }
 
 class OnboardingPage extends StatelessWidget {
-  const OnboardingPage({required this.coordinator, super.key});
+  const OnboardingPage({
+    required this.route,
+    required this.coordinator,
+    super.key,
+  });
 
+  final OnboardingRoute route;
   final AppCoordinator coordinator;
 
   @override
   Widget build(BuildContext context) {
     final host = coordinator.host;
-    final resume = host.resumeAfterOnboarding;
     return Scaffold(
       appBar: AppBar(title: const Text('Welcome')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          const Text(
-            'OnboardingGate sent you here: the app is not onboarded yet.',
-          ),
-          if (resume != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(
-                'You were going to $resume. Finishing onboarding continues '
-                'there.',
+      body: ListenableBuilder(
+        listenable: Listenable.merge([route.queryNotifier, host.onboarded]),
+        builder: (context, _) {
+          final resume = _localUri(route.query(OnboardingRoute.attemptQuery));
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Text(
+                resume != null
+                    ? 'OnboardingGate sent you here: the app is not onboarded '
+                          'yet.'
+                    : host.onboarded.value
+                    ? 'You are already onboarded.'
+                    : 'The app is not onboarded yet.',
               ),
-            ),
-          const SizedBox(height: 16),
-          FilledButton(
-            key: const Key('finish-onboarding'),
-            onPressed: () {
-              host.onboarded.value = true;
-              final next = host.resumeAfterOnboarding ?? HubRoute().toUri();
-              host.resumeAfterOnboarding = null;
-              coordinator.pushReplacementUri(next);
-            },
-            child: const Text('Finish onboarding'),
-          ),
-        ],
+              if (resume != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'You were going to $resume. Finishing onboarding '
+                    'continues there.',
+                  ),
+                ),
+              const SizedBox(height: 16),
+              FilledButton(
+                key: const Key('finish-onboarding'),
+                onPressed: () {
+                  host.onboarded.value = true;
+                  coordinator.pushReplacementUri(resume ?? HubRoute().toUri());
+                },
+                child: const Text('Finish onboarding'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }

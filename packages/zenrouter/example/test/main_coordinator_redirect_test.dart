@@ -287,9 +287,7 @@ void main() {
     await tapKey(tester, 'auth-sign-in');
 
     expect(
-      find.text(
-        'Signed in. OnboardingGate and RequireSession let this through.',
-      ),
+      find.text('OnboardingGate and RequireSession let this page open.'),
       findsOneWidget,
     );
     expect(trace(), [
@@ -2316,4 +2314,329 @@ void main() {
     );
     expect(c.shop.tabs.activeIndex, 1);
   });
+
+  // ---------------------------------------------------------------------------
+  // The review of 2026-09-19: the detour pages (onboarding, sign-in), and the
+  // edge cases no test drove.
+  // ---------------------------------------------------------------------------
+
+  testWidgets('detour: a chain of detours keeps the first origin, so "Not now" '
+      'goes where the sign-in page says', (tester) async {
+    c.twoFactor.enabled.value = true;
+    await pumpApp(tester);
+    await tapKey(tester, 'flag-onboarded');
+
+    await tapKey(tester, 'hub-security');
+    expect(
+      '${c.currentUri}',
+      '/welcome?from=%2F&continue=%2Faccount%2Fsecurity',
+    );
+
+    // The welcome page is a detour itself: it is not where the user came
+    // from, and it is gone once onboarding finishes.
+    await tapKey(tester, 'finish-onboarding');
+    expect(
+      '${c.currentUri}',
+      '/account/sign-in?from=%2F&continue=%2Faccount%2Fsecurity',
+    );
+    expect(find.text('You came from /.'), findsOneWidget);
+
+    await tapKey(tester, 'auth-not-now');
+
+    expect(find.text('Scoped redirect rules'), findsOneWidget);
+    expect('${c.currentUri}', '/');
+  });
+
+  testWidgets('detour: the welcome page keeps where the user was going in its '
+      'own URL, so an abandoned attempt leaves nothing behind', (tester) async {
+    await pumpApp(tester);
+    await tapKey(tester, 'flag-onboarded');
+    await tapKey(tester, 'hub-feed');
+    expect(
+      find.text(
+        'You were going to /feed/for-you. Finishing onboarding continues '
+        'there.',
+      ),
+      findsOneWidget,
+    );
+
+    // Walk away, get onboarded some other way, then open /welcome directly.
+    await back(tester);
+    await tapKey(tester, 'flag-onboarded');
+    await typeUrl(tester, '/welcome');
+
+    expect(find.text('You are already onboarded.'), findsOneWidget);
+    expect(find.textContaining('You were going to'), findsNothing);
+    expect(find.textContaining('sent you here'), findsNothing);
+
+    await tapKey(tester, 'finish-onboarding');
+
+    expect(find.text('Scoped redirect rules'), findsOneWidget);
+  });
+
+  testWidgets('detour: a URL taken from a query is followed only inside the '
+      'app', (tester) async {
+    for (final (from, next) in [
+      ('https%3A%2F%2Fevil.example%2Fa', 'https%3A%2F%2Fevil.example%2Fb'),
+      ('%2F%2Fevil.example%2Fa', '%2F%2Fevil.example%2Fb'),
+      ('', ''),
+      ('shop', 'shop'),
+    ]) {
+      c = AppCoordinator(
+        initialRoutePath: Uri.parse(
+          '/account/sign-in?from=$from&continue=$next',
+        ),
+      );
+      await pumpApp(tester);
+
+      expect(find.text('You opened this page yourself.'), findsOneWidget);
+      expect(find.textContaining('You came from'), findsNothing);
+
+      await tapKey(tester, 'auth-sign-in');
+
+      expect(find.text('Your profile'), findsOneWidget, reason: next);
+      expect('${c.currentUri}', '/account/profile', reason: next);
+    }
+  });
+
+  testWidgets('detour: continuing to the sign-in page or to the profile '
+      'itself lands on one profile', (tester) async {
+    for (final next in ['%2Faccount%2Fsign-in', '%2Faccount%2Fprofile']) {
+      c = AppCoordinator(
+        initialRoutePath: Uri.parse('/account/sign-in?continue=$next'),
+      );
+      await pumpApp(tester);
+
+      await tapKey(tester, 'auth-sign-in');
+
+      expect(
+        stacks(),
+        stacksWith({
+          'root': ['AuthLayout'],
+          'auth': ['ProfileRoute'],
+        }),
+        reason: next,
+      );
+    }
+  });
+
+  testWidgets('detour: "Not now" with nowhere to return opens the hub', (
+    tester,
+  ) async {
+    c = AppCoordinator(initialRoutePath: Uri.parse('/account/profile'));
+    await pumpApp(tester);
+
+    await tapKey(tester, 'auth-not-now');
+
+    expect(find.text('Scoped redirect rules'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute'],
+      }),
+    );
+  });
+
+  testWidgets('detour: signing in twice in one frame lands once', (
+    tester,
+  ) async {
+    c.twoFactor.enabled.value = true;
+    await pumpApp(tester);
+    await tapKey(tester, 'hub-security');
+
+    final button = find.byKey(const Key('auth-sign-in'));
+    await tester.tap(button);
+    await tester.tap(button, warnIfMissed: false);
+    await tester.pumpAndSettle();
+
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'AuthLayout', 'SecurityLayout'],
+        'auth': ['ProfileRoute'],
+        'security': ['SecuritySettingsRoute'],
+      }),
+    );
+  });
+
+  testWidgets('edge: three closed gates on one tap open one at a time, root '
+      'then enclosing then owner', (tester) async {
+    await pumpApp(tester);
+    await tapKey(tester, 'flag-onboarded');
+    c.host.clearTrace();
+
+    await tapKey(tester, 'hub-security');
+    expect(trace(), [
+      'OnboardingGate(SecuritySettingsRoute) → OnboardingRoute (not onboarded)',
+      pass('OnboardingGate', 'OnboardingRoute'),
+    ]);
+    expect(saw('RequireSession'), isEmpty);
+    expect(saw('RequireTwoFactor'), isEmpty);
+
+    c.host.clearTrace();
+    await tapKey(tester, 'finish-onboarding');
+    expect(trace(), [
+      pass('OnboardingGate', 'SecuritySettingsRoute'),
+      'RequireSession(SecuritySettingsRoute) → SignInRoute (no session)',
+      pass('OnboardingGate', 'SignInRoute'),
+      pass('RequireSession', 'SignInRoute'),
+    ]);
+    expect(saw('RequireTwoFactor'), isEmpty);
+
+    c.host.clearTrace();
+    await tapKey(tester, 'auth-sign-in');
+    expect(
+      trace().last,
+      'RequireTwoFactor(SecuritySettingsRoute) → stop (2FA is off)',
+    );
+    expect(saw('RequireTwoFactor'), ['SecuritySettingsRoute']);
+    expect(find.text('Your profile'), findsOneWidget);
+  });
+
+  testWidgets('edge: a session that ends while the profile is open gates the '
+      'next navigation, and a pop runs no rule', (tester) async {
+    c.authSession.signedIn.value = true;
+    c.twoFactor.enabled.value = true;
+    await pumpApp(tester);
+    await tapKey(tester, 'hub-profile');
+
+    c.authSession.signedIn.value = false;
+    await tester.pumpAndSettle();
+    await typeUrl(tester, '/account/security');
+
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'AuthLayout'],
+        'auth': ['ProfileRoute', 'SignInRoute'],
+      }),
+    );
+    expect(
+      '${c.currentUri}',
+      '/account/sign-in?from=%2Faccount%2Fprofile'
+          '&continue=%2Faccount%2Fsecurity',
+    );
+
+    c.host.clearTrace();
+    await tapKey(tester, 'auth-not-now');
+
+    // Rules guard entry, not presence: the open profile stays, and says so.
+    expect(trace(), isEmpty);
+    expect(find.text('Your profile'), findsOneWidget);
+    expect(
+      find.textContaining('Rules guard entry, not presence'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('edge: a subscription that lapses while Billing is open keeps '
+      'the tab, and stops the next switch to it', (tester) async {
+    c.shopAccount.subscribed.value = true;
+    await pumpApp(tester);
+    await tapKey(tester, 'hub-billing');
+    expect(c.shop.tabs.activeIndex, 2);
+
+    c.shopAccount.subscribed.value = false;
+    await tester.pumpAndSettle();
+    expect(c.shop.tabs.activeIndex, 2);
+
+    await tap(tester, navBar('Home'));
+    await tap(tester, navBar('Billing'));
+
+    expect(c.shop.tabs.activeIndex, 0);
+    expect(
+      stopNotice('SubscriptionGate(BillingTab) → stop (no subscription)'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('edge: 2FA turned off on the Security page keeps the page open', (
+    tester,
+  ) async {
+    c.authSession.signedIn.value = true;
+    c.twoFactor.enabled.value = true;
+    await pumpApp(tester);
+    await tapKey(tester, 'hub-security');
+    c.host.clearTrace();
+
+    await tapKey(tester, 'security-two-factor');
+
+    expect(c.twoFactor.enabled.value, isFalse);
+    expect(find.text('Security settings'), findsOneWidget);
+    expect(trace(), isEmpty);
+  });
+
+  testWidgets('edge: an unknown sort falls back to the first one, and a '
+      'fragment that names no section says so', (tester) async {
+    await pumpApp(tester);
+
+    await typeUrl(tester, '/shop/catalog?sort=bogus');
+    expect(find.text('Sorted by name'), findsOneWidget);
+
+    await typeUrl(tester, '/help/rules#nope');
+    expect(find.text('The fragment #nope names no section.'), findsOneWidget);
+    expect(find.byKey(const Key('help-section-stop-selected')), findsNothing);
+  });
+
+  test('edge: a post id is whatever int.tryParse accepts; a rest parameter '
+      'keeps unicode and an encoded slash', () async {
+    Future<RouteUnique?> parse(String uri) async =>
+        await c.parseRouteFromUri(Uri.parse(uri));
+
+    for (final (location, id) in [
+      ('/feed/for-you/post/0', 0),
+      ('/feed/for-you/post/-1', -1),
+      ('/feed/for-you/post/+5', 5),
+    ]) {
+      expect(await parse(location), PostRoute(FeedBranch.forYou, id));
+    }
+    expect(
+      await parse('/feed/for-you/post/99999999999999999999'),
+      isA<RouteNotFound>(),
+    );
+
+    final help = (await parse('/help/r%C3%BCles/a%2Fb'))! as HelpRoute;
+    expect(help.topic, ['rüles', 'a/b']);
+    expect('${help.toUri()}', '/help/r%C3%BCles/a%2Fb');
+  });
+
+  testWidgets('gap: a module route without its shell lands on the root stack, '
+      'so only the root gates it; redirectScopeOf is how to catch it', (
+    tester,
+  ) async {
+    await pumpApp(tester);
+    c.host.clearTrace();
+
+    // The documented gap, shown on the example's own tree: signed out, 2FA
+    // off, and neither RequireSession nor RequireTwoFactor is asked.
+    expect(c.redirectScopeOf(SecuritySettingsRoute()), [
+      same(c),
+      same(c.auth),
+      same(c.security),
+    ]);
+    expect(c.redirectScopeOf(StraySecurityRoute()), [same(c)]);
+
+    unawaited(c.push(StraySecurityRoute()));
+    await tester.pumpAndSettle();
+
+    expect(trace(), [pass('OnboardingGate', 'StraySecurityRoute')]);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'StraySecurityRoute[stray]'],
+      }),
+    );
+  });
+}
+
+/// A security route that forgot its shell: what the guide warns about.
+class StraySecurityRoute extends SecuritySettingsRoute {
+  @override
+  String get label => 'StraySecurityRoute';
+
+  @override
+  Type? get layout => null;
+
+  @override
+  List<Object?> get props => ['stray'];
 }

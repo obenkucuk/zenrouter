@@ -119,15 +119,53 @@ class AuthRouteModuleCoordinator extends Coordinator<RouteUnique>
   FutureOr<RouteUnique?> parseRouteFromUri(Uri uri) async =>
       await routeBindings.resolve(uri) ?? await super.parseRouteFromUri(uri);
 
-  /// Not reached while this coordinator is a module: for an unknown URI it
-  /// returns null, and the host's own fallback applies.
+  /// Never reached: this coordinator is only used as a module, where an
+  /// unknown URI returns null and the host's own not-found page applies. A
+  /// sign-in page would be the wrong answer to a mistyped URL.
   @override
-  RouteUnique notFoundRoute(Uri uri) => SignInRoute();
+  RouteUnique notFoundRoute(Uri uri) => throw UnsupportedError(
+    'AuthRouteModuleCoordinator is used as a module; the host supplies the '
+    'not-found page for $uri.',
+  );
 }
 
 AuthRouteModuleCoordinator _authOf(CoordinatorCore coordinator) =>
     (coordinator as CoordinatorModular<RouteUnique>)
         .getModule<AuthRouteModuleCoordinator>();
+
+/// A URL taken from a query, followed only when it stays in this app: no
+/// scheme, no host, an absolute path. Anything else, such as another site or
+/// an empty value, is dropped: a sign-in link must not be able to send the
+/// user somewhere its author chose.
+///
+/// Each module file keeps its own copy: modules share no file.
+Uri? _localUri(String? value) {
+  if (value == null || !value.startsWith('/') || value.startsWith('//')) {
+    return null;
+  }
+  final uri = Uri.tryParse(value);
+  return uri == null || uri.hasScheme || uri.hasAuthority ? null : uri;
+}
+
+/// Where the user comes from when a rule sends them on a detour: the page on
+/// screen. On a cold start there is none.
+///
+/// A page that is itself a detour, one that carries `from` or `continue`, is
+/// not where the user came from, and it is gone once the detour ends. Its own
+/// origin is inherited instead, so a chain of detours (the host's welcome
+/// page, then sign-in) keeps the first one, and a second gated URL typed over
+/// the sign-in page keeps it too. The two query names are the only thing the
+/// detour pages of different modules share; no import is needed.
+Uri? _originOf(CoordinatorCore coordinator) {
+  final onScreen = coordinator.activePath.activeRoute;
+  if (onScreen == null) return null;
+  if (onScreen case RouteQueryParameters(:final queries)
+      when queries.containsKey(SignInRoute.originQuery) ||
+          queries.containsKey(SignInRoute.attemptQuery)) {
+    return _localUri(queries[SignInRoute.originQuery]);
+  }
+  return coordinator.currentUri;
+}
 
 /// Sends a signed-out user to sign-in, and a signed-in user away from it.
 ///
@@ -169,18 +207,8 @@ class RequireSession extends RedirectRule<RouteUnique> {
     // from, so "Not now" can return there. It is this page's own, not shared
     // state: a sign-in page opened directly has neither.
     //
-    // The page on screen is where the user comes from. On a cold start
-    // nothing is on screen, so there is no origin. When the sign-in page
-    // itself is on screen, because a second gated URL was typed over it, it is
-    // not where the user came from: its own origin is kept.
-    final onScreen = coordinator.activePath.activeRoute;
-    final from = switch (onScreen) {
-      null => null,
-      SignInRoute(:final queries) => SignInRoute.originIn(queries),
-      _ => coordinator.currentUri,
-    };
     return RedirectResult.redirectTo(
-      SignInRoute.after(route.toUri(), from: from),
+      SignInRoute.after(route.toUri(), from: _originOf(coordinator)),
     );
   }
 }
@@ -277,18 +305,12 @@ class SignInRoute extends AuthRoute with RouteQueryParameters {
   /// Where the user was going when RequireSession sent them here, or null
   /// when they opened this page themselves.
   static Uri? attemptIn(Map<String, String> queries) =>
-      _uriIn(queries, attemptQuery);
+      _localUri(queries[attemptQuery]);
 
   /// The page the user was on when RequireSession sent them here, or null
   /// when there was none: a cold start, or a page opened directly.
   static Uri? originIn(Map<String, String> queries) =>
-      _uriIn(queries, originQuery);
-
-  static Uri? _uriIn(Map<String, String> queries, String name) =>
-      switch (queries[name]) {
-        final value? => Uri.tryParse(value),
-        null => null,
-      };
+      _localUri(queries[originQuery]);
 
   @override
   String get label => 'SignInRoute';
@@ -341,7 +363,11 @@ class SignInRoute extends AuthRoute with RouteQueryParameters {
               // nothing. Navigations run in the order they were started.
               final attempt = attemptIn(queries);
               coordinator.pushReplacement(ProfileRoute());
-              if (attempt != null && attempt != ProfileRoute().toUri()) {
+              // The profile is already where the user lands, and the sign-in
+              // page sends a signed-in user to the profile too: going on to
+              // either would put a second profile on the stack.
+              final here = {toUri().path, ProfileRoute().toUri().path};
+              if (attempt != null && !here.contains(attempt.path)) {
                 coordinator.pushUri(attempt);
               }
             },
@@ -382,7 +408,9 @@ class ProfileRoute extends AuthRoute {
     return _Page(
       heading: 'Your profile',
       lines: const [
-        'Signed in. OnboardingGate and RequireSession let this through.',
+        'OnboardingGate and RequireSession let this page open.',
+        'Rules guard entry, not presence: a session that ends later does not '
+            'close it.',
       ],
       children: [
         ListTile(

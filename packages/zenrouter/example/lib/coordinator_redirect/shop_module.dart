@@ -286,7 +286,9 @@ class CatalogTab extends ShopRoute with RouteQueryParameters {
           ValueListenableBuilder<Map<String, String>>(
             valueListenable: queryNotifier,
             builder: (context, queries, _) {
-              final sort = queries['sort'] ?? sorts.first;
+              // A query is whatever was typed: an unknown sort falls back.
+              final asked = queries['sort'];
+              final sort = sorts.contains(asked) ? asked! : sorts.first;
               return RadioGroup<String>(
                 groupValue: sort,
                 // Another sort order is the same tab: rewrite the URL in
