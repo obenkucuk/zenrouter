@@ -297,14 +297,28 @@ class NestedCoordinator extends CoordinatorCore<AppRoute>
         CoordinatorMutatable<AppRoute>,
         CoordinatorRecoverable<AppRoute>,
         CoordinatorModular<AppRoute> {
-  NestedCoordinator(this._parent, {this.childModules = const []});
+  NestedCoordinator(
+    this._parent, {
+    this.childModules = const [],
+    this.extraLabel = 'nested-extra',
+    this.childModulesBuilder,
+  });
 
   final CoordinatorModular<AppRoute> _parent;
   final Iterable<RouteModule<AppRoute>> childModules;
 
+  /// Debug label of [extra].
+  final String extraLabel;
+
+  /// Builds the child modules with this coordinator as their parent, so
+  /// module coordinators two levels deep can be composed. Preferred over
+  /// [childModules] when set.
+  final Iterable<RouteModule<AppRoute>> Function(NestedCoordinator self)?
+  childModulesBuilder;
+
   late final AppStackPath extra = AppStackPath(
     coordinator: this,
-    debugLabel: 'nested-extra',
+    debugLabel: extraLabel,
   );
 
   @override
@@ -317,7 +331,8 @@ class NestedCoordinator extends CoordinatorCore<AppRoute>
   List<StackPath> get paths => [...super.paths, extra];
 
   @override
-  Iterable<RouteModule<AppRoute>> defineModules() => childModules;
+  Iterable<RouteModule<AppRoute>> defineModules() =>
+      childModulesBuilder?.call(this) ?? childModules;
 
   @override
   AppRoute notFoundRoute(Uri uri) => AppRoute('nested-not-found');
@@ -394,5 +409,183 @@ class AsyncFeatureModule extends FeatureModule {
   Future<AppRoute?> parseRouteFromUri(Uri uri) async {
     if (delay != null) await Future<void>.delayed(delay!);
     return super.parseRouteFromUri(uri);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Module-scoped redirect rules (RouteModuleRedirectRule)
+// ---------------------------------------------------------------------------
+
+/// Logs `'$name(${route.id})'` for every route it is offered, records the
+/// coordinator it received, then returns [outcome] (continue by default).
+class RecordingRule extends RedirectRule<AppRoute> {
+  RecordingRule(this.name, this.log, {this.outcome});
+
+  final String name;
+  final List<String> log;
+
+  /// Decides the result per route. Mutable so a test can change a verdict
+  /// between navigations.
+  RedirectResult<AppRoute> Function(AppRoute route)? outcome;
+
+  /// Every coordinator this rule received, in call order.
+  final coordinators = <CoordinatorCore>[];
+
+  @override
+  FutureOr<RedirectResult<AppRoute>> redirectResult(
+    CoordinatorCore coordinator,
+    AppRoute route,
+  ) {
+    log.add('$name(${route.id})');
+    coordinators.add(coordinator);
+    return outcome?.call(route) ?? const RedirectResult.continueRedirect();
+  }
+}
+
+/// A modular root coordinator that declares module-scoped redirect rules.
+class ScopedModularApp extends ModularAppCoordinator
+    with RouteModuleRedirectRule<AppRoute> {
+  ScopedModularApp({required this.rules, super.modules});
+
+  /// Backs [redirectRules]; mutate it to change the rules live.
+  final List<RedirectRule> rules;
+
+  @override
+  List<RedirectRule> get redirectRules => rules;
+}
+
+/// A module coordinator that declares module-scoped redirect rules.
+class ScopedNested extends NestedCoordinator
+    with RouteModuleRedirectRule<AppRoute> {
+  ScopedNested(
+    super.parent, {
+    required this.rules,
+    super.childModules,
+    super.extraLabel,
+    super.childModulesBuilder,
+  });
+
+  /// Backs [redirectRules]; mutate it to change the rules live.
+  final List<RedirectRule> rules;
+
+  @override
+  List<RedirectRule> get redirectRules => rules;
+}
+
+/// A plain route module that declares module-scoped redirect rules.
+class ScopedFeature extends FeatureModule
+    with RouteModuleRedirectRule<AppRoute> {
+  ScopedFeature(
+    super.coordinator, {
+    required this.rules,
+    super.prefix,
+    super.hasPath,
+  });
+
+  /// Backs [redirectRules]; mutate it to change the rules live.
+  final List<RedirectRule> rules;
+
+  @override
+  List<RedirectRule> get redirectRules => rules;
+}
+
+/// A shell [AppLayout] that reports every `onDiscard` to [onDiscarded].
+class CountingLayout extends AppLayout {
+  CountingLayout(
+    super.id, {
+    required super.layoutKey,
+    required super.path,
+    required this.onDiscarded,
+  });
+
+  final void Function(CountingLayout layout) onDiscarded;
+  int discards = 0;
+
+  @override
+  void onDiscard() {
+    discards++;
+    onDiscarded(this);
+    super.onDiscard();
+  }
+}
+
+/// Registers the shell constructor for [key] on a coordinator, like
+/// [AppCoordinator.registerShell], and counts how many [CountingLayout]s it
+/// builds and how many of them are discarded.
+class CountingShellConstructor {
+  CountingShellConstructor(
+    CoordinatorCore coordinator, {
+    required this.key,
+    required StackPath path,
+  }) {
+    coordinator.defineLayoutParentConstructor(key, (layoutKey) {
+      final layout = CountingLayout(
+        layoutKey.toString(),
+        layoutKey: layoutKey,
+        path: path,
+        onDiscarded: (_) => discards++,
+      );
+      built.add(layout);
+      return layout;
+    });
+  }
+
+  final Object key;
+
+  /// Every layout the constructor built, in order.
+  final built = <CountingLayout>[];
+
+  /// Total `onDiscard` calls across [built].
+  int discards = 0;
+
+  int get constructions => built.length;
+}
+
+/// A coordinator that declares module-scoped redirect rules and works either
+/// standalone (no [parent], so `isRouteModule` is false) or registered as a
+/// module of [parent]: one class in two roles.
+class DualRoleCoordinator extends CoordinatorCore<AppRoute>
+    with
+        RecordingListenable,
+        CoordinatorLayoutCore<AppRoute>,
+        CoordinatorNavigatable<AppRoute>,
+        CoordinatorMutatable<AppRoute>,
+        CoordinatorRecoverable<AppRoute>,
+        RouteModuleRedirectRule<AppRoute> {
+  DualRoleCoordinator({this.parent, required this.rules, this.label = 'dual'});
+
+  final CoordinatorModular<AppRoute>? parent;
+  final List<RedirectRule> rules;
+  final String label;
+
+  late final AppStackPath _ownRoot = AppStackPath(
+    coordinator: this,
+    debugLabel: '$label-root',
+  );
+
+  /// The stack this coordinator owns in either role.
+  late final AppStackPath stack = AppStackPath(
+    coordinator: this,
+    debugLabel: label,
+  );
+
+  @override
+  CoordinatorModular<AppRoute> get coordinator => parent ?? super.coordinator;
+
+  @override
+  StackPath<AppRoute> get root => parent?.root ?? _ownRoot;
+
+  @override
+  List<StackPath> get paths => [...super.paths, stack];
+
+  @override
+  List<RedirectRule> get redirectRules => rules;
+
+  @override
+  FutureOr<AppRoute?> parseRouteFromUri(Uri uri) {
+    if (isRouteModule) return null;
+    return AppRoute(
+      uri.pathSegments.isEmpty ? 'home' : uri.pathSegments.join('/'),
+    );
   }
 }

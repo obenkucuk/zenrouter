@@ -14,8 +14,19 @@ export 'src/routing/binding.dart';
 export 'src/contracts/mutatable.dart';
 export 'src/contracts/navigatable.dart';
 
-export 'src/coordinator/base.dart';
-export 'src/coordinator/modular.dart';
+export 'src/coordinator/base.dart'
+    hide
+        CoordinatorRedirectTree,
+        RootStackListed,
+        RouteModuleTree,
+        RouteModuleTreeNode,
+        RouteModuleTreeProblem,
+        RouteModuleTreeRedirect,
+        SiblingSharedStack,
+        StackFromOtherTree,
+        StackPathRedirectDebug,
+        StackWithoutCoordinator;
+export 'src/coordinator/modular.dart' hide registeredModulesOf;
 export 'src/coordinator/binding.dart';
 
 export 'src/path/base.dart';

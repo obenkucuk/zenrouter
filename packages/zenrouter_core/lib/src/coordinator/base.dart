@@ -11,6 +11,8 @@ import 'package:zenrouter_core/src/internal/reactive.dart';
 import 'package:zenrouter_core/src/mixin/deeplink.dart';
 import 'package:zenrouter_core/src/mixin/layout.dart';
 import 'package:zenrouter_core/src/mixin/redirect.dart';
+import 'package:zenrouter_core/src/mixin/redirect_rule.dart';
+import 'package:zenrouter_core/src/mixin/target.dart';
 import 'package:zenrouter_core/src/mixin/uri.dart';
 import 'package:zenrouter_core/src/path/base.dart';
 import 'package:zenrouter_core/src/path/commit.dart';
@@ -20,9 +22,11 @@ import 'package:zenrouter_core/src/routing/cancellation.dart';
 import 'package:zenrouter_core/src/routing/manifest.dart';
 
 part 'layout.dart';
+part 'module_tree.dart';
 part 'mutatable.dart';
 part 'navigatable.dart';
 part 'recoverable.dart';
+part 'redirect.dart';
 
 /// The central hub for navigation state in ZenRouter.
 ///
@@ -64,6 +68,30 @@ abstract class CoordinatorCore<T extends RouteUri> extends Equatable
   late final CoordinatorCore<T> rootCoordinator = isRouteModule
       ? coordinator
       : this;
+
+  /// Always `true` on a real coordinator.
+  ///
+  /// A test double that only implements the [CoordinatorCore] interface
+  /// cannot provide a private member of another library, so reading this on
+  /// one throws [NoSuchMethodError]. [RouteModuleTree.rootOf] probes it to
+  /// tell a double from a real coordinator without running any user code.
+  bool get _isCoordinatorCore => true;
+
+  /// The coordinator at the top of this coordinator's module tree, the one
+  /// used as `routerConfig`.
+  ///
+  /// Walks [coordinator] until it reaches a standalone coordinator, so a
+  /// module coordinator two or more levels deep reaches the same tree root.
+  /// Unlike [rootCoordinator], which goes one hop only. `null` when an
+  /// ancestor is a test double: such a coordinator belongs to no module tree.
+  /// Read through [RouteModuleTree.rootOf].
+  late final CoordinatorCore? _moduleTreeRoot = isRouteModule
+      ? RouteModuleTree.rootOf(coordinator)
+      : this;
+
+  /// The module tree this coordinator roots, built on first read and read
+  /// only on the tree root; see [RouteModuleTree.of].
+  late final RouteModuleTree _moduleTree = RouteModuleTree._build(this);
 
   @override
   @mustCallSuper

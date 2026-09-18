@@ -71,6 +71,7 @@ Nested mutations publish one `NavigationCommit`. `uri.pushWith(coordinator)` par
 | `RouteDeepLink` | `replace` / `navigate` / `push` / `custom` |
 | `RouteLayoutParent` / `RouteLayoutChild` | Nested shells (`layoutKey` is `Object`) |
 | `RouteRedirectRule` / `RouteGuardRule` | Composable rule chains |
+| `RouteModuleRedirectRule` | On a module or the root, not a route: redirect rules for every route that lands in its stacks |
 | `RouteNotFound` | 404; keep the requested URI |
 
 ## CoordinatorModular
@@ -90,6 +91,8 @@ class AppCoordinator extends CoordinatorCore<AppRoute>
 ```
 
 Each module implements `parseRouteFromUri` and returns `null` for URLs it does not own. First non-null wins.
+
+`RouteModuleRedirectRule` gives a module, a module coordinator or the root its own `redirectRules`. They gate every destination that lands in a stack the module lists in `paths`, or in a stack of one of its sub-modules; the root lists every stack, so its rules gate every destination. They run root first, then outer to inner, then the route's own redirect. `redirectScopeOf(route)`, on any coordinator of the tree, returns that chain. [Guide](https://github.com/definev/zenrouter/blob/main/packages/zenrouter/doc/guides/coordinator-as-module.md#redirect-rules-scoped-to-a-module)
 
 ## RouteManifest
 

@@ -1,3 +1,58 @@
+## Unreleased
+
+### New Features
+
+- **Module-scoped redirect rules** via `RouteModuleRedirectRule`. Mix it
+  into the root coordinator, a coordinator used as a module, or a plain
+  `RouteModule`, and list `redirectRules`. They gate every destination that
+  lands in a stack the module lists in `paths`, or in a stack of one of its
+  sub-modules; the root lists every stack, so its rules gate every
+  destination. A destination lands where the coordinator commits it (the
+  stack its parent layout resolves to, otherwise the root stack), decided at
+  the tree root whatever the call site, so every entry point gives it the
+  same chain. Rules run root first, then each enclosing module, then the
+  owning module, then the route's own redirect; the first stop or redirect
+  wins, and a redirect target is resolved again from the top of its own
+  chain. Layout parents are never offered, and rules receive the tree root
+  as their coordinator. A tree in which no module mixes it in has no scoped
+  rules.
+- **`redirectScopeOf(destination)`** on any coordinator of the tree returns
+  the modules whose rules gate a destination, in the order they run: the
+  supported way to ask whether a destination is gated, and to pin a chain
+  in a test.
+- **Misconfigured scopes fail loudly** in a tree that opts in. The first
+  resolution throws `StateError` for a declaring module whose subtree lists
+  no stack, a stack listed by two sibling modules, a module listing the root
+  stack, and a listed stack whose coordinator is missing or belongs to
+  another tree. Navigating throws `StateError` when a call is made on a
+  declaring module coordinator missing from `defineModules`, when the
+  destination names a parent layout the tree root cannot build, and when it
+  lands in a stack no module lists. In debug, a path-level commit into a
+  stack whose owners' rules did not run for the route asserts, and so does
+  navigating again to a route, or switching to a tab entry, that the owners
+  of the stack it sits in would not gate. A declaring module missing from
+  `defineModules` is otherwise not detected: its rules never run.
+
+### Breaking Changes
+
+- **The redirect hop budget counts moves.** `RouteRedirect.maxRedirectHops`
+  (20) limits how many times one resolution may move its target. A pass
+  that leaves the target where it is costs nothing, whatever the terminal
+  route is and whether or not module rules gate it, so opting a tree in
+  never shifts the limit. This is deliberate, and one move more permissive
+  for a chain that ends on a route returning itself from `redirect` or
+  `redirectWith`: it now resolves after 20 moves, where 3.0.0-beta.1
+  stopped at 19. Other chains keep their limit. A cycle is now detected when
+  the repeated route redirects again, and the limit when the 21st move is
+  made, after that redirect has run. The error message is unchanged.
+
+### Fixes
+
+- **`RouteRedirect.resolve` never discards a live route.** A route that is
+  bound to a stack and is re-resolved, then stopped or redirected away,
+  keeps its result pending instead of being completed with `null` while on
+  screen.
+
 ## 3.0.0-beta.1
 
 Prerelease for early testers. APIs may still change before 3.0.0.

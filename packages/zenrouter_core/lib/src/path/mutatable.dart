@@ -40,7 +40,9 @@ mixin StackMutatable<T extends RouteTarget> on StackPath<T>
 
   /// Adds a new route to the top of the stack.
   ///
-  /// Resolves redirects via [RouteRedirect.resolve] before pushing.
+  /// Resolves redirects via [RouteRedirect.resolve] before pushing, including
+  /// the module redirect rules that gate the route (see
+  /// [RouteModuleRedirectRule]).
   /// Returns a future that completes when the popped route provides a result.
   @override
   Future<R?> push<R extends Object>(T element) async {
@@ -77,6 +79,7 @@ mixin StackMutatable<T extends RouteTarget> on StackPath<T>
   }
 
   void _addRouteToStack(T target) {
+    assert(debugAssertRedirectOwnersGated(target));
     target.isPopByPath = false;
     target.bindStackPath(this);
     _stack.add(target);
@@ -152,6 +155,7 @@ mixin StackMutatable<T extends RouteTarget> on StackPath<T>
   @override
   @internal
   void commitResolvedMoveToTop(T target) {
+    assert(debugAssertRedirectOwnersGated(target));
     target.isPopByPath = false;
     target.bindStackPath(this);
     final index = _stack.indexOf(target);

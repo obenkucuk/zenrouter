@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:zenrouter_core/zenrouter_core.dart';
 
+import '../support/harness.dart';
+
 class BaseRoute extends RouteTarget {
   BaseRoute(this.id);
   final String id;
@@ -92,6 +94,127 @@ void main() {
       );
     });
   });
+
+  group('C20 RouteRedirect.resolve never discards a live route', () {
+    test(
+      'a live route stopped by a module rule keeps its result pending; a fresh one is discarded once',
+      () async {
+        final log = <String>[];
+        final app = ScopedModularApp(
+          rules: [
+            RecordingRule(
+              'gate',
+              log,
+              outcome: (_) => const RedirectResult.stop(),
+            ),
+          ],
+        );
+        final live = TrackingRoute('blocked');
+        (app.root as AppStackPath).seed([live]);
+        expect(live.stackPath, same(app.root));
+
+        expect(await RouteRedirect.resolve<AppRoute>(live, app), isNull);
+        expect(live.events, isEmpty);
+
+        final fresh = TrackingRoute('blocked');
+        expect(await RouteRedirect.resolve<AppRoute>(fresh, app), isNull);
+        expect(fresh.events, ['onDiscard']);
+
+        expect(log, ['gate(blocked)', 'gate(blocked)']);
+        expect(app.root.stack, [same(live)]);
+      },
+    );
+
+    test(
+      'a live route redirected away by a module rule is not discarded; a fresh one is discarded once',
+      () async {
+        final log = <String>[];
+        final app = ScopedModularApp(
+          rules: [
+            RecordingRule(
+              'gate',
+              log,
+              outcome: (r) => r.id == 'old'
+                  ? RedirectResult.redirectTo(AppRoute('new'))
+                  : const RedirectResult.continueRedirect(),
+            ),
+          ],
+        );
+        final live = TrackingRoute('old');
+        (app.root as AppStackPath).seed([live]);
+
+        expect((await RouteRedirect.resolve<AppRoute>(live, app))?.id, 'new');
+        expect(live.events, isEmpty);
+
+        final fresh = TrackingRoute('old');
+        expect((await RouteRedirect.resolve<AppRoute>(fresh, app))?.id, 'new');
+        expect(fresh.events, ['onDiscard']);
+
+        expect(log, ['gate(old)', 'gate(new)', 'gate(old)', 'gate(new)']);
+        expect(app.root.stack, [same(live)]);
+      },
+    );
+
+    test(
+      'in an opted-out tree a live route whose own redirect stops or moves is not discarded',
+      () async {
+        final coordinator = AppCoordinator();
+        final liveStop = _TrackingRedirectRoute('stop', stop: true);
+        final liveMove = _TrackingRedirectRoute('move', to: AppRoute('away'));
+        (coordinator.root as AppStackPath).seed([liveStop, liveMove]);
+
+        expect(
+          await RouteRedirect.resolve<AppRoute>(liveStop, coordinator),
+          isNull,
+        );
+        expect(
+          (await RouteRedirect.resolve<AppRoute>(liveMove, coordinator))?.id,
+          'away',
+        );
+        expect(liveStop.events, isEmpty);
+        expect(liveMove.events, isEmpty);
+
+        final freshStop = _TrackingRedirectRoute('stop', stop: true);
+        final freshMove = _TrackingRedirectRoute('move', to: AppRoute('away'));
+        expect(
+          await RouteRedirect.resolve<AppRoute>(freshStop, coordinator),
+          isNull,
+        );
+        expect(
+          (await RouteRedirect.resolve<AppRoute>(freshMove, coordinator))?.id,
+          'away',
+        );
+        expect(freshStop.events, ['onDiscard']);
+        expect(freshMove.events, ['onDiscard']);
+
+        expect(coordinator.root.stack, [same(liveStop), same(liveMove)]);
+      },
+    );
+
+    test(
+      'a committed route that is navigated to again and stopped stays on screen with its result pending',
+      () async {
+        final log = <String>[];
+        final rules = <RedirectRule>[];
+        final app = ScopedModularApp(rules: rules);
+        final live = TrackingRoute('page');
+        await app.pushSilently(live);
+
+        rules.add(
+          RecordingRule(
+            'gate',
+            log,
+            outcome: (_) => const RedirectResult.stop(),
+          ),
+        );
+        await app.navigate(live);
+
+        expect(log, ['gate(page)']);
+        expect(live.events, isEmpty);
+        expect(app.root.stack, [same(live)]);
+      },
+    );
+  });
 }
 
 class _UnusedCoordinator implements CoordinatorCore<RouteUri> {
@@ -122,4 +245,17 @@ class _CyclicRedirectRoute extends BaseRoute with RouteRedirect<BaseRoute> {
 
   @override
   BaseRoute redirect() => next;
+}
+
+/// A live-trackable route whose own redirect stops or moves to [to].
+class _TrackingRedirectRoute extends TrackingRoute
+    with RouteRedirect<AppRoute> {
+  _TrackingRedirectRoute(super.id, {this.to, this.stop = false});
+
+  final AppRoute? to;
+  final bool stop;
+
+  @override
+  FutureOr<AppRoute?> redirectWith(covariant CoordinatorCore coordinator) =>
+      stop ? null : (to ?? this);
 }

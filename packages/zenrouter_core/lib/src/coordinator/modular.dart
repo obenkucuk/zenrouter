@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:meta/meta.dart' show internal;
 import 'package:zenrouter_core/src/coordinator/base.dart';
 import 'package:zenrouter_core/src/mixin/target.dart';
 import 'package:zenrouter_core/src/mixin/uri.dart';
@@ -238,3 +239,12 @@ mixin CoordinatorModular<T extends RouteUri> on CoordinatorCore<T> {
     return notFoundRoute(uri);
   }
 }
+
+/// The direct child modules of [module], in [CoordinatorModular.defineModules]
+/// order; read by the module tree.
+///
+/// A library function rather than a member, so it adds nothing an app's own
+/// coordinator could clash with or override. Hidden from the package barrel.
+@internal
+List<RouteModule> registeredModulesOf(CoordinatorModular module) =>
+    module._moduleList;
