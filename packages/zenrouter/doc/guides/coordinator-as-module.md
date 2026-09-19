@@ -354,7 +354,9 @@ needed changing.
 - **Rules guard entry, not presence.** `pop`, `tryPop`, system back,
   `remove`, `reset` and `replaceAll` run no rule, and a page that is open
   stays open when a rule's state changes. Browser back re-enters a URL, so
-  it is gated.
+  it is gated. A page that must close when its condition ends watches that
+  condition and enters itself again, which runs its chain: the example's
+  security settings page does.
 - **Restoration re-gates only the active route.** It rebinds every
   restored stack as it was, then re-navigates the active route through its
   chain. Other restored entries are not re-gated, and neither is a restored
@@ -562,12 +564,20 @@ A query and a fragment are not part of a route's identity. Typing another one
 reaches the page that is already open through `onUpdate`, and the page
 rewrites its URL in place when the user changes it.
 
-The two detour pages, welcome and sign-in, keep both ends of the trip in
-their URL instead of in shared state: `continue` is where the user was going,
-`from` is the page they were on. A rule that sends a user on a detour reads
-the page on screen as the origin, and inherits the origin of a page that is
-itself a detour, so welcome then sign-in still returns to the first page. A
-URL taken from a query is followed only when it stays in the app.
+The three detour pages, welcome, sign-in and two-factor setup, keep both
+ends of the trip in their URL instead of in shared state: `continue` is
+where the user was going, `from` is the page they were on. A rule that sends
+a user on a detour reads the page on screen as the origin, and inherits the
+origin of a page that is itself a detour, so welcome then sign-in still
+returns to the first page. A URL taken from a query is followed only when it
+stays in the app.
+
+`RequireTwoFactor` redirects to `TwoFactorSetupRoute`, a route of its own
+module, and continues for it. The settings page shows how a rule that guards
+entry is made to guard presence: it watches the condition that let it open,
+and when 2FA is turned off it enters itself again (`pushReplacement` of its
+own route), so the chain runs and the rule decides. The page needs no `pop`
+of its own.
 
 The entry point,
 [`main_coordinator_redirect.dart`](../../example/lib/main_coordinator_redirect.dart),
