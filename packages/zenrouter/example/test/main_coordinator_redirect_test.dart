@@ -61,6 +61,7 @@ List<RouteTarget> everyRoute() => [
   ProfileRoute(),
   SecurityLayout(),
   SecuritySettingsRoute(),
+  TwoFactorSetupRoute(),
 ];
 
 /// The label [route] declares through its module's route base.
@@ -447,32 +448,39 @@ void main() {
   });
 
   testWidgets('E5 the security module, two levels deep, runs after the root '
-      'and auth rules; a Stop cancels', (tester) async {
+      'and auth rules; without 2FA it redirects to its own page', (
+    tester,
+  ) async {
     await pumpApp(tester);
     await tapKey(tester, 'flag-signed-in');
     c.host.clearTrace();
 
-    // Signed in, 2FA off: the chain runs root, auth, security, and stops.
+    // Signed in, 2FA off: the chain runs root, auth, security, and the
+    // security rule redirects to its own page, which gets the chain again.
     await tapKey(tester, 'hub-security');
 
     expect(trace(), [
       pass('OnboardingGate', 'SecuritySettingsRoute'),
       pass('RequireSession', 'SecuritySettingsRoute'),
-      'RequireTwoFactor(SecuritySettingsRoute) → stop (2FA is off)',
+      'RequireTwoFactor(SecuritySettingsRoute) → TwoFactorSetupRoute '
+          '(2FA is off)',
+      pass('OnboardingGate', 'TwoFactorSetupRoute'),
+      pass('RequireSession', 'TwoFactorSetupRoute'),
+      pass('RequireTwoFactor', 'TwoFactorSetupRoute'),
     ]);
-    expect(find.text('Scoped redirect rules'), findsOneWidget);
+    expect(find.byType(AlertDialog), findsOneWidget);
     expect(find.text('Security settings'), findsNothing);
     expect(
       stacks(),
       stacksWith({
-        'root': ['HubRoute'],
+        'root': ['HubRoute', 'SecurityLayout'],
+        'security': ['TwoFactorSetupRoute'],
       }),
     );
 
-    // 2FA on: the same tap opens the page.
-    await tapKey(tester, 'flag-two-factor');
+    // 2FA on: the two-factor page continues to the settings.
     c.host.clearTrace();
-    await tapKey(tester, 'hub-security');
+    await tapKey(tester, 'security-2fa-turn-on');
 
     expect(find.text('Security settings'), findsOneWidget);
     expect(trace(), [
@@ -870,6 +878,11 @@ void main() {
       expect(from.redirectScopeOf(SignInRoute()), [root, auth]);
       expect(from.redirectScopeOf(ProfileRoute()), [root, auth]);
       expect(from.redirectScopeOf(SecuritySettingsRoute()), [
+        root,
+        auth,
+        security,
+      ]);
+      expect(from.redirectScopeOf(TwoFactorSetupRoute()), [
         root,
         auth,
         security,
@@ -1272,6 +1285,10 @@ void main() {
     expect(await parse('/account/sign-in'), isA<SignInRoute>());
     expect(await parse('/account/profile'), isA<ProfileRoute>());
     expect(await parse('/account/security'), isA<SecuritySettingsRoute>());
+    expect(
+      await parse('/account/security/two-factor'),
+      isA<TwoFactorSetupRoute>(),
+    );
     expect(await parse('/nope'), NotFoundRoute(Uri.parse('/nope')));
   });
 
@@ -1343,7 +1360,8 @@ void main() {
       pass('OnboardingGate', 'PostRoute'),
       pass('SubscriptionGate', 'CatalogTab'),
       'RequireSession(ProfileRoute) → SignInRoute (no session)',
-      'RequireTwoFactor(SecuritySettingsRoute) → stop (2FA is off)',
+      'RequireTwoFactor(SecuritySettingsRoute) → TwoFactorSetupRoute '
+          '(2FA is off)',
     ]);
     for (final (rule, label) in <(RedirectRule, String)>[
       (onboarding, 'OnboardingGate'),
@@ -1401,12 +1419,13 @@ void main() {
         unawaited(c.replace(RenamedHub()));
         await tester.pumpAndSettle();
       }
-      // A Stop, a redirect and a Stop two levels deep: unsubscribed, signed
-      // out, 2FA off.
+      // A Stop, a redirect and a redirect two levels deep: unsubscribed,
+      // signed out, 2FA off.
       await tapKey(tester, 'hub-billing');
       await tapKey(tester, 'hub-profile');
       await tapKey(tester, 'auth-sign-in');
       await tapKey(tester, 'auth-link-security');
+      await tapKey(tester, 'security-2fa-not-now');
       await back(tester);
       // Then every shell open at once, and something in every stack.
       await tapKey(tester, 'flag-subscribed');
@@ -1486,7 +1505,7 @@ void main() {
           'continue',
           'stop (no subscription)',
           'SignInRoute (no session)',
-          'stop (2FA is off)',
+          'TwoFactorSetupRoute (2FA is off)',
         ]),
       );
 
@@ -1752,18 +1771,11 @@ void main() {
 
   testWidgets('walk: a rule that stops a navigation says so on screen, from '
       'the hub and on a tab tap', (tester) async {
-    c.authSession.signedIn.value = true;
     await pumpApp(tester);
 
-    await tapKey(tester, 'hub-security');
+    await tapKey(tester, 'hub-billing');
 
     expect(find.text('Scoped redirect rules'), findsOneWidget);
-    expect(
-      stopNotice('RequireTwoFactor(SecuritySettingsRoute) → stop (2FA is off)'),
-      findsOneWidget,
-    );
-
-    await tapKey(tester, 'hub-billing');
 
     expect(
       stopNotice('SubscriptionGate(BillingTab) → stop (no subscription)'),
@@ -1780,8 +1792,8 @@ void main() {
     );
   });
 
-  testWidgets('walk: signing in leaves the sign-in page even when a deeper '
-      'rule stops where the user was going', (tester) async {
+  testWidgets('walk: signing in leaves the sign-in page for the profile, and '
+      'a deeper gate then opens over it', (tester) async {
     await pumpApp(tester);
 
     await tapKey(tester, 'hub-security');
@@ -1794,21 +1806,22 @@ void main() {
 
     await tapKey(tester, 'auth-sign-in');
 
-    // Signed in, but Security needs 2FA: the user is on the profile, and the
-    // stop is on screen.
-    expect(find.text('Your profile'), findsOneWidget);
+    // Signed in, but Security needs 2FA: the profile replaced the sign-in
+    // page, and the security module's two-factor page opened over it.
     expect(find.text('Sign in'), findsNothing);
-    expect(
-      stopNotice('RequireTwoFactor(SecuritySettingsRoute) → stop (2FA is off)'),
-      findsOneWidget,
-    );
+    expect(find.byType(AlertDialog), findsOneWidget);
     expect(
       stacks(),
       stacksWith({
-        'root': ['HubRoute', 'AuthLayout'],
+        'root': ['HubRoute', 'AuthLayout', 'SecurityLayout'],
         'auth': ['ProfileRoute'],
+        'security': ['TwoFactorSetupRoute'],
       }),
     );
+
+    await tapKey(tester, 'security-2fa-not-now');
+
+    expect(find.text('Your profile'), findsOneWidget);
   });
 
   testWidgets('walk: signing in with 2FA on opens Security over the profile, '
@@ -2035,6 +2048,7 @@ void main() {
         '/account/sign-in',
         '/account/profile',
         '/account/security',
+        '/account/security/two-factor',
       },
     );
     expect(
@@ -2072,7 +2086,7 @@ void main() {
         PostRoute(FeedBranch.following, 12),
         FeedListRoute(FeedBranch.following),
       ];
-      expect(routes, hasLength(13));
+      expect(routes, hasLength(14));
 
       for (final route in routes) {
         expect(
@@ -2486,11 +2500,17 @@ void main() {
     c.host.clearTrace();
     await tapKey(tester, 'auth-sign-in');
     expect(
-      trace().last,
-      'RequireTwoFactor(SecuritySettingsRoute) → stop (2FA is off)',
+      trace(),
+      contains(
+        'RequireTwoFactor(SecuritySettingsRoute) → TwoFactorSetupRoute '
+        '(2FA is off)',
+      ),
     );
-    expect(saw('RequireTwoFactor'), ['SecuritySettingsRoute']);
-    expect(find.text('Your profile'), findsOneWidget);
+    expect(saw('RequireTwoFactor'), [
+      'SecuritySettingsRoute',
+      'TwoFactorSetupRoute',
+    ]);
+    expect(find.byType(AlertDialog), findsOneWidget);
   });
 
   testWidgets('edge: a session that ends while the profile is open gates the '
@@ -2548,22 +2568,6 @@ void main() {
       stopNotice('SubscriptionGate(BillingTab) → stop (no subscription)'),
       findsOneWidget,
     );
-  });
-
-  testWidgets('edge: 2FA turned off on the Security page keeps the page open', (
-    tester,
-  ) async {
-    c.authSession.signedIn.value = true;
-    c.twoFactor.enabled.value = true;
-    await pumpApp(tester);
-    await tapKey(tester, 'hub-security');
-    c.host.clearTrace();
-
-    await tapKey(tester, 'security-two-factor');
-
-    expect(c.twoFactor.enabled.value, isFalse);
-    expect(find.text('Security settings'), findsOneWidget);
-    expect(trace(), isEmpty);
   });
 
   testWidgets('edge: an unknown sort falls back to the first one, and a '
@@ -2624,6 +2628,173 @@ void main() {
       stacks(),
       stacksWith({
         'root': ['HubRoute', 'StraySecurityRoute[stray]'],
+      }),
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Two-factor: the security module's rule redirects to a page in its own
+  // stack, and the settings page enters itself again when 2FA is turned off.
+  // ---------------------------------------------------------------------------
+
+  const toTwoFactor =
+      'RequireTwoFactor(SecuritySettingsRoute) → TwoFactorSetupRoute '
+      '(2FA is off)';
+
+  testWidgets('2fa: with 2FA off, Security opens the two-factor page in the '
+      'security shell, and turning it on continues to the settings', (
+    tester,
+  ) async {
+    c.authSession.signedIn.value = true;
+    await pumpApp(tester);
+    c.host.clearTrace();
+
+    await tapKey(tester, 'hub-security');
+
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(find.text('Turn on two-factor authentication'), findsOneWidget);
+    expect(find.text('Security settings'), findsNothing);
+    // An ordinary page of the security stack, not a popup route over it.
+    expect(
+      ModalRoute.of(tester.element(find.byType(AlertDialog))),
+      isA<PageRoute<Object?>>(),
+    );
+    // The redirect target lands in the same module, so it gets the whole
+    // chain again, and RequireTwoFactor continues for it.
+    expect(trace(), [
+      pass('OnboardingGate', 'SecuritySettingsRoute'),
+      pass('RequireSession', 'SecuritySettingsRoute'),
+      toTwoFactor,
+      pass('OnboardingGate', 'TwoFactorSetupRoute'),
+      pass('RequireSession', 'TwoFactorSetupRoute'),
+      pass('RequireTwoFactor', 'TwoFactorSetupRoute'),
+    ]);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'SecurityLayout'],
+        'security': ['TwoFactorSetupRoute'],
+      }),
+    );
+    expect(
+      '${c.currentUri}',
+      '/account/security/two-factor?from=%2F&continue=%2Faccount%2Fsecurity',
+    );
+
+    await tapKey(tester, 'security-2fa-turn-on');
+
+    expect(c.twoFactor.enabled.value, isTrue);
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.text('Security settings'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'SecurityLayout'],
+        'security': ['SecuritySettingsRoute'],
+      }),
+    );
+  });
+
+  testWidgets('2fa: "Not now" leaves Security and returns where the user was', (
+    tester,
+  ) async {
+    c.authSession.signedIn.value = true;
+    await pumpApp(tester);
+    await tapKey(tester, 'hub-profile');
+    await tapKey(tester, 'auth-link-security');
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(
+      '${c.currentUri}',
+      '/account/security/two-factor?from=%2Faccount%2Fprofile'
+          '&continue=%2Faccount%2Fsecurity',
+    );
+
+    await tapKey(tester, 'security-2fa-not-now');
+
+    expect(c.twoFactor.enabled.value, isFalse);
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.text('Your profile'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'AuthLayout'],
+        'auth': ['ProfileRoute'],
+      }),
+    );
+  });
+
+  testWidgets('2fa: turning 2FA off on the settings page enters the page '
+      'again, so the rule opens the two-factor page; "Not now" leaves, '
+      '"Turn on" returns', (tester) async {
+    c.authSession.signedIn.value = true;
+    c.twoFactor.enabled.value = true;
+    await pumpApp(tester);
+    await tapKey(tester, 'hub-security');
+    expect(find.text('Security settings'), findsOneWidget);
+    c.host.clearTrace();
+
+    await tapKey(tester, 'security-two-factor');
+
+    // The page watches its own condition and asks the rule again.
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(trace(), contains(toTwoFactor));
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'SecurityLayout'],
+        'security': ['TwoFactorSetupRoute'],
+      }),
+    );
+    // The page the user is kept out of is not where they came from.
+    expect(
+      '${c.currentUri}',
+      '/account/security/two-factor?continue=%2Faccount%2Fsecurity',
+    );
+
+    await tapKey(tester, 'security-2fa-not-now');
+    expect(find.text('Scoped redirect rules'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute'],
+      }),
+    );
+
+    // Again, and this time turn it back on.
+    c.twoFactor.enabled.value = true;
+    await tapKey(tester, 'hub-security');
+    await tapKey(tester, 'security-two-factor');
+    expect(find.byType(AlertDialog), findsOneWidget);
+
+    await tapKey(tester, 'security-2fa-turn-on');
+
+    expect(c.twoFactor.enabled.value, isTrue);
+    expect(find.text('Security settings'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute', 'SecurityLayout'],
+        'security': ['SecuritySettingsRoute'],
+      }),
+    );
+  });
+
+  testWidgets('2fa: a cold start on the two-factor page has nothing under it, '
+      'so "Not now" opens the hub', (tester) async {
+    c = AppCoordinator(
+      initialRoutePath: Uri.parse('/account/security/two-factor'),
+    );
+    c.authSession.signedIn.value = true;
+    await pumpApp(tester);
+    expect(find.byType(AlertDialog), findsOneWidget);
+
+    await tapKey(tester, 'security-2fa-not-now');
+
+    expect(find.text('Scoped redirect rules'), findsOneWidget);
+    expect(
+      stacks(),
+      stacksWith({
+        'root': ['HubRoute'],
       }),
     );
   });

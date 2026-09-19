@@ -24,7 +24,8 @@
 //         |                                   (behind AuthLayout)
 //         +-- SecurityModule        plain module, two levels deep:
 //               security  NavigationPath      [RequireTwoFactor]
-//                                             SecuritySettingsRoute
+//                                             SecuritySettingsRoute,
+//                                             TwoFactorSetupRoute
 //                                             (behind SecurityLayout)
 //
 // The chain each destination gets, in the order its rules run:
@@ -34,8 +35,8 @@
 //   HomeTab, CatalogTab, BillingTab            OnboardingGate > SubscriptionGate
 //   FeedListRoute, PostRoute                   OnboardingGate
 //   SignInRoute, ProfileRoute                  OnboardingGate > RequireSession
-//   SecuritySettingsRoute                      OnboardingGate > RequireSession
-//                                              > RequireTwoFactor
+//   SecuritySettingsRoute,                     OnboardingGate > RequireSession
+//   TwoFactorSetupRoute                        > RequireTwoFactor
 //   every layout (shells and branch roots)     none
 //
 // Three shapes carry the same mixin, on purpose. The root is a coordinator.
